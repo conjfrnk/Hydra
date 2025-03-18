@@ -32,13 +32,29 @@
   </div>
 
   <script>
-    // 1) Create a Worker to poll job status
+    // 1) Time formatting for HH:MM:SS
+    function formatHMS(totalSeconds) {
+      // Convert to integer
+      totalSeconds = Math.floor(totalSeconds);
+      const hh = Math.floor(totalSeconds / 3600);
+      const remainder = totalSeconds % 3600;
+      const mm = Math.floor(remainder / 60);
+      const ss = remainder % 60;
+
+      const hhStr = hh.toString().padStart(2, '0');
+      const mmStr = mm.toString().padStart(2, '0');
+      const ssStr = ss.toString().padStart(2, '0');
+
+      return `${hhStr}:${mmStr}:${ssStr}`;
+    }
+
+    // 2) Worker for polling
     let pollWorker = new Worker("/static/heartbeatWorker.js");
     let currentJobId = "";
     let startTime = 0;
     let currentPercent = 0;
 
-    // 2) Chart Setup
+    // 3) Chart Setup
     const ACTUAL_PI = 3.141592653589793;
     const ctx = document.getElementById('chart').getContext('2d');
 
@@ -117,22 +133,23 @@
 
     const progressDiv = document.getElementById('progress');
 
+    // 4) Enhance the arrow-up/arrow-down logic
     const pointsInput = document.getElementById('points');
-    // Also guard "min=1" so we never go below 1
     pointsInput.addEventListener('keydown', (e) => {
       if (e.key === "ArrowUp") {
         e.preventDefault();
         let val = parseInt(pointsInput.value || "1", 10);
-        val = val * 10;  // multiply by 10
+        val = val * 10;
         pointsInput.value = val;
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         let val = parseInt(pointsInput.value || "1", 10);
-        val = Math.max(1, Math.floor(val / 10)); // divide by 10
+        val = Math.max(1, Math.floor(val / 10));
         pointsInput.value = val;
       }
     });
 
+    // 5) Worker messages => update chart, etc.
     pollWorker.onmessage = function(e) {
       let msg = e.data;
       if (msg.type === "STATUS") {
@@ -140,14 +157,15 @@
         let sData = msg.data;
 
         if (sData.status === "finished") {
+          // final Pi
           let finalVal = parseFloat(sData.result || sData.partial_result);
           let endTime = Date.now();
           let elapsedMs = endTime - startTime;
-          let mins = Math.floor(elapsedMs / 60000);
-          let secs = Math.floor((elapsedMs % 60000) / 1000);
-          let mmss = `${mins}:${secs.toString().padStart(2, '0')}`;
+          // Convert to HH:MM:SS
+          let elapsedSec = elapsedMs / 1000;
+          let hms = formatHMS(elapsedSec);
 
-          progressDiv.textContent = `Done! Approx pi: ${finalVal} (${mmss})`;
+          progressDiv.textContent = `Done! Approx pi: ${finalVal} (${hms})`;
           chart.data.datasets[0].data.push({ x: 100, y: finalVal });
           chart.update();
 
@@ -161,16 +179,14 @@
           currentPercent = pct;
           chart.update();
 
-          // Estimated time left
+          // Estimate time left => HH:MM:SS
           let elapsedSec = (Date.now() - startTime) / 1000;
           let fraction = pct / 100;
           let timeLeftStr = "";
           if (fraction > 0.01) {
             let totalSecEst = elapsedSec / fraction;
             let remainSec = totalSecEst - elapsedSec;
-            let mm = Math.floor(remainSec / 60);
-            let ss = Math.floor(remainSec % 60);
-            timeLeftStr = ` ~${mm}m ${ss}s left`;
+            timeLeftStr = ` ~${formatHMS(remainSec)} left`;
           }
           progressDiv.textContent =
             `Job in progress... Approx pi: ${sData.partial_result} ` +
@@ -191,12 +207,12 @@
       }
     };
 
+    // 6) If the tab is refocused => catch up on chart data
     document.addEventListener('visibilitychange', async () => {
       if (!document.hidden && currentJobId) {
-        // Tab is visible => fetch all samples
+        // Tab is visible => fetch all samples from job_history
         try {
           let samples = await fetchJobHistory(currentJobId);
-          // fill chart with all samples
           chart.data.datasets[0].data = samples.map(s => ({
             x: s.percent,
             y: s.approx_pi
@@ -214,10 +230,11 @@
       if (!resp.ok) {
         throw new Error(`History fetch error: ${resp.status} => ${await resp.text()}`);
       }
-      let data = await resp.json(); // { samples: [...] }
+      let data = await resp.json();
       return data.samples || [];
     }
 
+    // 7) Form => start a new job
     const form = document.getElementById('piForm');
     form.addEventListener('submit', async (evt) => {
       evt.preventDefault();
@@ -255,8 +272,8 @@
       // reset chart
       chart.data.datasets[0].data = [];
       chart.data.datasets[1].data = [
-        {x: 0,   y: ACTUAL_PI},
-        {x: 100, y: ACTUAL_PI}
+        { x: 0,   y: ACTUAL_PI },
+        { x: 100, y: ACTUAL_PI }
       ];
       chart.update();
       currentPercent = 0;
