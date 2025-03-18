@@ -22,7 +22,7 @@ struct AvailableJobResponse {
 struct AssignChunkResponse {
     chunk_index: Option<u64>,
     chunk_size: u64,
-    job_status: String, // "in-progress", "finished", or "error"/"paused"
+    job_status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,13 +56,13 @@ struct RegisterWorkerResponse {
 ///////////////////////////////////////
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1) Build an HTTPS client (retry on failure)
+    // Build an HTTPS client in a loop
     let client = loop {
         match build_https_client().await {
             Ok(c) => break c,
             Err(e) => {
                 eprintln!("[Worker] build_https_client error: {:?}", e);
-                eprintln!("[Worker] Retrying in 2s...");
+                eprintln!("[Worker] Retrying in 2 seconds...");
                 thread::sleep(Duration::from_secs(2));
                 continue;
             }
@@ -71,65 +71,68 @@ async fn main() -> Result<()> {
 
     let worker_id = "my_single_worker".to_string();
 
-    // 2) Register worker in a loop
+    // Register the Worker in a loop
     loop {
         match register_worker(&client, &worker_id).await {
             Ok(_) => break,
             Err(e) => {
                 eprintln!("[Worker] register_worker error: {:?}", e);
+                eprintln!("[Worker] Retrying in 2 seconds...");
                 thread::sleep(Duration::from_secs(2));
             }
         }
     }
 
-    // 3) Repeat: find job, assign chunk, compute, submit
+    // Infinity loop: pick an available job, do a chunk, submit. Repeat.
     loop {
         match find_available_job(&client).await {
             Ok(Some(job_id)) => {
-                match assign_chunk(&client, &job_id).await {
-                    Ok(chunk_info) => {
-                        if chunk_info.chunk_index.is_none() {
-                            // no chunk means job done/error/paused
-                            println!(
-                                "[Worker] job_id={} => no chunk => done/error/paused?",
-                                job_id
-                            );
-                            thread::sleep(Duration::from_millis(500));
-                            continue;
-                        }
-
-                        let cindex = chunk_info.chunk_index.unwrap();
-                        let cpoints = chunk_info.chunk_size;
-                        println!(
-                            "[Worker] job_id={} => chunk_index={} => size={}",
-                            job_id, cindex, cpoints
-                        );
-
-                        // Monte Carlo
-                        let points_in_circle = do_monte_carlo(cpoints);
-
-                        // submit
-                        let sc_req = SubmitChunkRequest {
-                            worker_id: worker_id.clone(),
-                            job_id: job_id.clone(),
-                            chunk_index: cindex,
-                            points_in_circle,
-                            chunk_points: cpoints,
-                        };
-                        if let Err(e) = submit_chunk(&client, &sc_req).await {
-                            eprintln!("[Worker] submit_chunk error: {:?}", e);
-                        }
-
-                        // short sleep
-                        thread::sleep(Duration::from_millis(200));
-                    }
+                // For each job, try to get a chunk until none is returned
+                let chunk_data = match assign_chunk(&client, &job_id, &worker_id).await {
+                    Ok(c) => c,
                     Err(e) => {
                         eprintln!("[Worker] assign_chunk error: {:?}", e);
                         thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                };
+
+                if chunk_data.chunk_index.is_none() {
+                    // job finished/error/paused => no chunk
+                    println!("[Worker] job_id={} => no chunk => done/err/paused?", job_id);
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+
+                let cindex = chunk_data.chunk_index.unwrap();
+                let cpoints = chunk_data.chunk_size;
+                println!(
+                    "[Worker] job_id={} => worker_id={} => chunk_index={} => chunk_size={}",
+                    job_id, worker_id, cindex, cpoints
+                );
+
+                // do Monte Carlo
+                let points_in_circle = do_monte_carlo(cpoints);
+
+                // submit
+                let sc_req = SubmitChunkRequest {
+                    worker_id: worker_id.clone(),
+                    job_id: job_id.clone(),
+                    chunk_index: cindex,
+                    points_in_circle,
+                    chunk_points: cpoints,
+                };
+                match submit_chunk(&client, &sc_req).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[Worker] submit_chunk error: {:?}", e);
                     }
                 }
+
+                thread::sleep(Duration::from_millis(200));
             }
             Ok(None) => {
+                // No job => sleep
                 println!("[Worker] No in-progress jobs => sleeping...");
                 thread::sleep(Duration::from_secs(2));
             }
@@ -187,12 +190,19 @@ async fn find_available_job(client: &Client) -> Result<Option<String>> {
             resp.text().await?
         );
     }
-    let parsed: AvailableJobResponse = resp.json().await?;
-    Ok(parsed.job_id)
+    let avail: AvailableJobResponse = resp.json().await?;
+    Ok(avail.job_id)
 }
 
-async fn assign_chunk(client: &Client, job_id: &str) -> Result<AssignChunkResponse> {
-    let url = format!("{}/api/assign_chunk/{}", SCHEDULER_URL, job_id);
+async fn assign_chunk(
+    client: &Client,
+    job_id: &str,
+    worker_id: &str,
+) -> Result<AssignChunkResponse> {
+    let url = format!(
+        "{}/api/assign_chunk/{}?worker_id={}",
+        SCHEDULER_URL, job_id, worker_id
+    );
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
         bail!(
@@ -201,8 +211,8 @@ async fn assign_chunk(client: &Client, job_id: &str) -> Result<AssignChunkRespon
             resp.text().await?
         );
     }
-    let parsed: AssignChunkResponse = resp.json().await?;
-    Ok(parsed)
+    let chunk_resp: AssignChunkResponse = resp.json().await?;
+    Ok(chunk_resp)
 }
 
 async fn submit_chunk(client: &Client, sc_req: &SubmitChunkRequest) -> Result<()> {

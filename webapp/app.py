@@ -114,7 +114,7 @@ def job_history(job_id):
         if not resp.ok:
             return jsonify({"error": f"Non-OK from scheduler: {resp.status_code} {resp.text}"}), resp.status_code
 
-        data = resp.json()  # e.g. { "samples": [ { "percent": 12.3, "approx_pi": 3.1415 }, ... ] }
+        data = resp.json()
         return jsonify(data), 200
     except Exception as e:
         print(f"[WebApp] Exception in job_history: {e}")

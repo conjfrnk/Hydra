@@ -20,7 +20,6 @@
 
   <form id="piForm">
     <label for="points">Number of random points:</label>
-    <!-- Default to 1,000,000,000, min=1, step=any -->
     <input type="number" id="points" name="points" min="1" step="any" value="1000000000">
     <button type="submit">Calculate</button>
   </form>
@@ -32,7 +31,6 @@
   </div>
 
   <script>
-    // 1) Time formatting for HH:MM:SS
     function formatHMS(totalSeconds) {
       totalSeconds = Math.floor(totalSeconds);
       const hh = Math.floor(totalSeconds / 3600);
@@ -40,20 +38,14 @@
       const mm = Math.floor(remainder / 60);
       const ss = remainder % 60;
 
-      const hhStr = hh.toString().padStart(2, '0');
-      const mmStr = mm.toString().padStart(2, '0');
-      const ssStr = ss.toString().padStart(2, '0');
-
-      return `${hhStr}:${mmStr}:${ssStr}`;
+      return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
     }
 
-    // 2) Worker for polling
     let pollWorker = new Worker("/static/heartbeatWorker.js");
     let currentJobId = "";
     let startTime = 0;
     let currentPercent = 0;
 
-    // 3) Chart Setup
     const ACTUAL_PI = 3.141592653589793;
     const ctx = document.getElementById('chart').getContext('2d');
 
@@ -94,8 +86,8 @@
           {
             label: 'Actual Pi',
             data: [
-              { x: 0,   y: ACTUAL_PI },
-              { x: 100, y: ACTUAL_PI }
+              {x: 0,   y: ACTUAL_PI},
+              {x: 100, y: ACTUAL_PI}
             ],
             borderColor: 'red',
             borderDash: [10, 5],
@@ -131,8 +123,6 @@
     });
 
     const progressDiv = document.getElementById('progress');
-
-    // 4) Enhance the arrow-up/arrow-down logic
     const pointsInput = document.getElementById('points');
     pointsInput.addEventListener('keydown', (e) => {
       if (e.key === "ArrowUp") {
@@ -148,7 +138,6 @@
       }
     });
 
-    // 5) Worker messages => update chart, etc.
     pollWorker.onmessage = function(e) {
       let msg = e.data;
       if (msg.type === "STATUS") {
@@ -156,7 +145,6 @@
         let sData = msg.data;
 
         if (sData.status === "finished") {
-          // final Pi
           let finalVal = parseFloat(sData.result || sData.partial_result);
           let endTime = Date.now();
           let elapsedMs = endTime - startTime;
@@ -177,7 +165,6 @@
           currentPercent = pct;
           chart.update();
 
-          // Estimate time left => HH:MM:SS
           let elapsedSec = (Date.now() - startTime) / 1000;
           let fraction = pct / 100;
           let timeLeftStr = "";
@@ -205,7 +192,6 @@
       }
     };
 
-    // 6) If the tab is refocused => catch up on chart data
     document.addEventListener('visibilitychange', async () => {
       if (!document.hidden && currentJobId) {
         try {
@@ -215,7 +201,6 @@
             y: s.approx_pi
           }));
           chart.update();
-          console.log("[Tab] caught up data, length=", samples.length);
         } catch(e) {
           console.warn("Catch-up error =>", e);
         }
@@ -231,13 +216,11 @@
       return data.samples || [];
     }
 
-    // 7) Form => start a new job
     const form = document.getElementById('piForm');
     form.addEventListener('submit', async (evt) => {
       evt.preventDefault();
       const points = document.getElementById('points').value;
 
-      // kill old job if any
       if (currentJobId) {
         try {
           await fetch("/mark_old_job", {
@@ -266,7 +249,6 @@
       let createData = await createResp.json();
       currentJobId = createData.job_id;
 
-      // reset chart
       chart.data.datasets[0].data = [];
       chart.data.datasets[1].data = [
         { x: 0,   y: ACTUAL_PI },
@@ -277,7 +259,6 @@
       startTime = Date.now();
 
       progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
-      // start the worker => poll every 1s
       pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 1000 });
     });
   </script>
