@@ -2,7 +2,7 @@
 name = "hydra-worker"
 version = "0.3.0"
 authors = ["Connor <conjfrnk@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 tokio = { version = "1.21", features = ["rt-multi-thread", "macros"] }
