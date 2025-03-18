@@ -2,7 +2,7 @@
 
 ## Distributed Pi Calculation
 
-This part of the project demonstrates a **distributed approach to calculating π (pi)** using **dynamic chunking**. It involves three main components:
+This part of the project demonstrates a **distributed approach to calculating $\pi$ (pi)** using **dynamic chunking**. It involves three main components:
 
 1. **Scheduler (Rust)** – Coordinates jobs, assigns work chunks, and tracks completion.  
 2. **Worker (Rust)** – Performs Monte Carlo simulations for a given chunk of points.  
@@ -17,14 +17,14 @@ This part of the project demonstrates a **distributed approach to calculating π
 - The user visits the **WebApp**, inputs a large number of random points (e.g., 1 billion).
 - The WebApp instructs the **Scheduler** to create a new job.
 - **Workers** (which can be on the same machine or multiple machines) query the Scheduler for an available job, receive a chunk of random points to compute, run the Monte Carlo step, and submit partial results back to the Scheduler.
-- The Scheduler aggregates partial results (points inside the circle vs. total points) to estimate π.
+- The Scheduler aggregates partial results (points inside the circle vs. total points) to estimate $\pi$.
 - The WebApp periodically polls the Scheduler to update the progress and final result in a browser chart.
 
 ### Monte Carlo Pi Calculation
 
-- Each Worker randomly generates points \((x, y)\) in the unit square \([0,1) \times [0,1)\).
-- A point lies inside the unit circle if \(x^2 + y^2 \leq 1\).
-- The fraction of points inside vs. total points, multiplied by 4, approximates π. (Because the area of a unit circle is π, and the square’s area is 1, so the ratio \(\pi / 4\) is expected if points are uniformly distributed.)
+- Each Worker randomly generates points $(x, y)$ in the unit square $[0,1) \times [0,1)$.
+- A point lies inside the unit circle if $x^2 + y^2 \leq 1$.
+- The fraction of points inside vs. total points, multiplied by 4, approximates $\pi$. (Because the area of a unit circle is $\pi$, and the square’s area is 1, so the ratio $\pi / 4$ is expected if points are uniformly distributed.)
 
 ### Dynamic Chunking
 
