@@ -26,9 +26,11 @@ SCHEDULER_CERT = os.path.join("certs", "scheduler_cert.pem")
 
 job_data = {}
 
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 @app.route("/mark_old_job", methods=["POST"])
 def mark_old_job():
@@ -54,6 +56,7 @@ def mark_old_job():
 
     return jsonify({"status": "old job killed"}), 200
 
+
 @app.route("/start_job", methods=["POST"])
 def start_job():
     """
@@ -71,19 +74,15 @@ def start_job():
         "status": "in-progress",
         "result": "",
         "partial_result": "",
-        "percent_complete": 0.0
+        "percent_complete": 0.0,
     }
 
     try:
         create_url = f"{SCHEDULER_URL}/api/create_job"
         resp = requests.post(
             create_url,
-            json={
-                "job_id": job_id,
-                "task_type": "calculate_pi",
-                "points": int(points)
-            },
-            verify=SCHEDULER_CERT
+            json={"job_id": job_id, "task_type": "calculate_pi", "points": int(points)},
+            verify=SCHEDULER_CERT,
         )
         print(f"[WebApp] Scheduler create_job => status_code={resp.status_code}")
         resp.raise_for_status()
@@ -92,6 +91,7 @@ def start_job():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"job_id": job_id}), 200
+
 
 @app.route("/job_status/<job_id>", methods=["GET"])
 def job_status(job_id):
@@ -103,8 +103,7 @@ def job_status(job_id):
 
     try:
         resp = requests.get(
-            f"{SCHEDULER_URL}/api/job_status/{job_id}",
-            verify=SCHEDULER_CERT
+            f"{SCHEDULER_URL}/api/job_status/{job_id}", verify=SCHEDULER_CERT
         )
         if resp.ok:
             sched_info = resp.json()
@@ -119,6 +118,7 @@ def job_status(job_id):
 
     return jsonify(job_data[job_id])
 
+
 @app.route("/job_history/<job_id>", methods=["GET"])
 def job_history(job_id):
     """
@@ -128,13 +128,19 @@ def job_history(job_id):
         url = f"{SCHEDULER_URL}/api/job_history/{job_id}"
         resp = requests.get(url, verify=SCHEDULER_CERT)
         if not resp.ok:
-            return jsonify({"error": f"Non-OK from scheduler: {resp.status_code} {resp.text}"}), resp.status_code
+            return (
+                jsonify(
+                    {"error": f"Non-OK from scheduler: {resp.status_code} {resp.text}"}
+                ),
+                resp.status_code,
+            )
 
         data = resp.json()
         return jsonify(data), 200
     except Exception as e:
         print(f"[WebApp] Exception in job_history: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     print("[WebApp] Starting Flask app on http://127.0.0.1:5000")
