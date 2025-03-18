@@ -34,7 +34,6 @@
   <script>
     // 1) Time formatting for HH:MM:SS
     function formatHMS(totalSeconds) {
-      // Convert to integer
       totalSeconds = Math.floor(totalSeconds);
       const hh = Math.floor(totalSeconds / 3600);
       const remainder = totalSeconds % 3600;
@@ -95,8 +94,8 @@
           {
             label: 'Actual Pi',
             data: [
-              {x: 0,   y: ACTUAL_PI},
-              {x: 100, y: ACTUAL_PI}
+              { x: 0,   y: ACTUAL_PI },
+              { x: 100, y: ACTUAL_PI }
             ],
             borderColor: 'red',
             borderDash: [10, 5],
@@ -161,7 +160,6 @@
           let finalVal = parseFloat(sData.result || sData.partial_result);
           let endTime = Date.now();
           let elapsedMs = endTime - startTime;
-          // Convert to HH:MM:SS
           let elapsedSec = elapsedMs / 1000;
           let hms = formatHMS(elapsedSec);
 
@@ -210,7 +208,6 @@
     // 6) If the tab is refocused => catch up on chart data
     document.addEventListener('visibilitychange', async () => {
       if (!document.hidden && currentJobId) {
-        // Tab is visible => fetch all samples from job_history
         try {
           let samples = await fetchJobHistory(currentJobId);
           chart.data.datasets[0].data = samples.map(s => ({
@@ -243,7 +240,7 @@
       // kill old job if any
       if (currentJobId) {
         try {
-          let killResp = await fetch("/mark_old_job", {
+          await fetch("/mark_old_job", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ old_job_id: currentJobId })
@@ -280,7 +277,7 @@
       startTime = Date.now();
 
       progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
-      // start worker => poll every 1s
+      // start the worker => poll every 1s
       pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 1000 });
     });
   </script>

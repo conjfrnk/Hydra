@@ -32,6 +32,15 @@ struct AppState {
     round_counter: Arc<Mutex<u64>>,
 }
 
+// Additional fields to store average performance
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct WorkerStats {
+    worker_id: String,
+    total_compute: u64,
+    avg_points_per_sec: f64, // dynamic scheduling metric
+    measure_count: u64,      // how many times we've measured
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct JobInfo {
     job_id: String,
@@ -41,7 +50,9 @@ struct JobInfo {
     percent_complete: f32,
 
     points: u64,
+    // We'll still store an initial chunk_size, but actually adapt in assign_chunk
     chunk_size: u64,
+
     completed_chunks: u64,
     total_chunks: u64,
     points_in_circle: u64,
@@ -64,12 +75,6 @@ struct JobInfo {
 struct ChunkAssignment {
     worker_id: String,
     assigned_at: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct WorkerStats {
-    worker_id: String,
-    total_compute: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +165,7 @@ async fn main() -> Result<()> {
         round_counter: Arc::new(Mutex::new(0)),
     };
 
-    // sampling partial Pi every 500ms
+    // background sampling: partial Pi every 500ms
     {
         let sampling_jobs = state.jobs.clone();
         tokio::spawn(async move {
@@ -224,13 +229,16 @@ async fn create_job(
     Json(payload): Json<CreateJobRequest>,
 ) -> Json<CreateJobResponse> {
     println!("[Scheduler] create_job: {:?}", payload);
+
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
 
-    let chunk_size = 100_000;
-    let total_chunks = (payload.points + chunk_size - 1) / chunk_size;
+    // Start with chunk_size=100k, but we'll do dynamic logic in assign_chunk
+    let base_chunk_size = 100_000;
+    let total_chunks = (payload.points + base_chunk_size - 1) / base_chunk_size;
 
     let now = current_timestamp();
+
     let job_info = JobInfo {
         job_id: payload.job_id.clone(),
         status: "in-progress".to_string(),
@@ -239,7 +247,8 @@ async fn create_job(
         percent_complete: 0.0,
 
         points: payload.points,
-        chunk_size,
+        chunk_size: base_chunk_size,
+
         completed_chunks: 0,
         total_chunks,
         points_in_circle: 0,
@@ -249,13 +258,11 @@ async fn create_job(
 
         average_chunk_time: 5.0,
         chunks_in_progress: HashMap::new(),
-
-        // set last_webapp_poll=now
         last_webapp_poll: now,
-
         samples: Vec::new(),
         killed_chunks: HashSet::new(),
     };
+
     jobs.insert(payload.job_id.clone(), job_info);
     queue.push(payload.job_id.clone());
 
@@ -281,6 +288,7 @@ async fn get_job_status(
     if let Some(job) = jobs.get_mut(&job_id) {
         job.last_webapp_poll = current_timestamp(); // reset inactivity
 
+        // if job was paused => resume
         if job.status == "paused" {
             job.status = "in-progress".to_string();
             println!("[Scheduler] job_id={} => resumed via webapp poll", job_id);
@@ -323,6 +331,8 @@ async fn register_worker(
         .or_insert(WorkerStats {
             worker_id: payload.worker_id.clone(),
             total_compute: 0,
+            avg_points_per_sec: 0.0,
+            measure_count: 0,
         });
 
     println!("[Scheduler] Worker {} => registered", payload.worker_id);
@@ -334,7 +344,7 @@ async fn register_worker(
 }
 
 /////////////////////////////////////
-// submit_chunk => does NOT update last_webapp_poll
+// submit_chunk => update partial, measure performance, do not update last_webapp_poll
 /////////////////////////////////////
 async fn submit_chunk(
     State(state): State<AppState>,
@@ -343,6 +353,7 @@ async fn submit_chunk(
     println!("[Scheduler] submit_chunk: {:?}", payload);
 
     let now = current_timestamp();
+
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
 
@@ -369,9 +380,7 @@ async fn submit_chunk(
             _ => {}
         }
 
-        // We do NOT update job.last_webapp_poll
-
-        // If chunk is "killed", ignore
+        // skip if chunk was killed
         if job.killed_chunks.contains(&payload.chunk_index) {
             println!(
                 "[Scheduler] ignoring chunk={} for job={} (killed)",
@@ -383,9 +392,11 @@ async fn submit_chunk(
             });
         }
 
-        // remove from in-progress
+        // measure chunk time
+        let mut elapsed_sec = 0.0;
         if let Some(assignment) = job.chunks_in_progress.remove(&payload.chunk_index) {
-            let elapsed_sec = (now.saturating_sub(assignment.assigned_at)) as f64;
+            elapsed_sec = now.saturating_sub(assignment.assigned_at) as f64;
+            // smooth job-level chunk time
             let alpha = 0.3;
             job.average_chunk_time = alpha * elapsed_sec + (1.0 - alpha) * job.average_chunk_time;
         }
@@ -399,8 +410,8 @@ async fn submit_chunk(
         job.partial_result = format!("{:.6}", partial_pi);
         job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
 
-        // done?
         if job.points_total >= job.points {
+            // done
             let final_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
             job.samples.push(SamplePoint {
                 approx_pi: final_val,
@@ -425,29 +436,54 @@ async fn submit_chunk(
         let mut workers = state.workers.lock().unwrap();
         let updated_total = if let Some(w) = workers.get_mut(&payload.worker_id) {
             w.total_compute += 1;
+
+            // measure points/sec
+            if elapsed_sec > 0.0 && payload.chunk_points > 0 {
+                let pps = payload.chunk_points as f64 / elapsed_sec;
+                // update exponential or weighted average
+                let old_avg = w.avg_points_per_sec;
+                let alpha = 0.3;
+                if w.measure_count == 0 {
+                    w.avg_points_per_sec = pps;
+                } else {
+                    w.avg_points_per_sec = (1.0 - alpha) * old_avg + alpha * pps;
+                }
+                w.measure_count += 1;
+
+                println!(
+                    "[Scheduler] Worker={} => chunk_points={}, elapsed={:.2}s => pps={:.2}, old_avg={:.2}, new_avg={:.2}",
+                    w.worker_id,
+                    payload.chunk_points,
+                    elapsed_sec,
+                    pps,
+                    old_avg,
+                    w.avg_points_per_sec
+                );
+            }
+
             w.total_compute
         } else {
             0
         };
 
-        Json(SubmitChunkResponse {
+        return Json(SubmitChunkResponse {
             status: "chunk_submitted".to_string(),
             updated_worker_total: updated_total,
-        })
+        });
     } else {
         println!(
             "[Scheduler] job_id={} not found in submit_chunk",
             payload.job_id
         );
-        Json(SubmitChunkResponse {
+        return Json(SubmitChunkResponse {
             status: "not_found".to_string(),
             updated_worker_total: 0,
-        })
+        });
     }
 }
 
 /////////////////////////////////////
-// available_job => skip paused, error, finished
+// available_job => skip paused/error/finished
 /////////////////////////////////////
 async fn available_job(State(state): State<AppState>) -> Json<AvailableJobResponse> {
     let jobs = state.jobs.lock().unwrap();
@@ -470,6 +506,7 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
         return Json(AvailableJobResponse { job_id: None });
     }
 
+    // round-robin pick
     let idx = (*counter as usize) % in_progress.len();
     *counter += 1;
     let chosen = in_progress[idx].clone();
@@ -480,13 +517,14 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
 }
 
 /////////////////////////////////////
-// assign_chunk => immediate check => if >10 => paused
+// assign_chunk => dynamic chunk sizing logic
 /////////////////////////////////////
 async fn assign_chunk(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<AssignChunkResponse>, (StatusCode, &'static str)> {
     let now = current_timestamp();
+
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
 
@@ -494,7 +532,7 @@ async fn assign_chunk(
         // inactivity => only webapp polls matter => last_webapp_poll
         let elapsed = now.saturating_sub(job.last_webapp_poll);
         if job.status == "in-progress" && elapsed > 10 {
-            // paused
+            // forcibly pause
             job.status = "paused".to_string();
             println!(
                 "[Scheduler] job_id={} => immediate pause after {}s no webapp poll",
@@ -508,7 +546,7 @@ async fn assign_chunk(
             }));
         }
 
-        // normal states
+        // check job state
         match job.status.as_str() {
             "finished" => {
                 return Ok(Json(AssignChunkResponse {
@@ -534,8 +572,8 @@ async fn assign_chunk(
             _ => {}
         }
 
-        // no more chunks => finished
-        if job.next_chunk >= job.total_chunks {
+        // if done
+        if job.points_total >= job.points {
             job.status = "finished".to_string();
             job.result = job.partial_result.clone();
             job.percent_complete = 100.0;
@@ -547,9 +585,10 @@ async fn assign_chunk(
             }));
         }
 
-        // otherwise, assign chunk
+        // otherwise assign next chunk
         let cindex = job.next_chunk;
         job.next_chunk += 1;
+
         job.chunks_in_progress.insert(
             cindex,
             ChunkAssignment {
@@ -558,9 +597,58 @@ async fn assign_chunk(
             },
         );
 
+        // find how many points remain
+        let remaining = job.points.saturating_sub(job.points_total);
+
+        // dynamic chunking => find fastest worker’s pps
+        let workers_map = state.workers.lock().unwrap();
+        let fastest_pps = workers_map
+            .values()
+            .map(|w| w.avg_points_per_sec)
+            .fold(0.0, f64::max);
+
+        // base chunk => job.chunk_size, but we adapt
+        let mut dynamic_chunk = job.chunk_size;
+
+        if fastest_pps > 0.0 {
+            // Aim for ~2s chunk on the fastest worker
+            let target_time = 2.0;
+            let base = fastest_pps * target_time;
+            dynamic_chunk = base as u64;
+
+            // clamp: 1/2 to 2× the job’s chunk_size
+            if dynamic_chunk < job.chunk_size / 2 {
+                dynamic_chunk = job.chunk_size / 2;
+            } else if dynamic_chunk > job.chunk_size * 2 {
+                dynamic_chunk = job.chunk_size * 2;
+            }
+        }
+
+        // ensure we don’t exceed remaining
+        if dynamic_chunk > remaining {
+            dynamic_chunk = remaining;
+        }
+
+        // if near end, we might reduce further
+        if job.percent_complete > 90.0 {
+            let leftover = job.points - job.points_total;
+            if leftover < dynamic_chunk {
+                dynamic_chunk = leftover;
+            }
+        }
+
+        if dynamic_chunk == 0 {
+            dynamic_chunk = 1;
+        }
+
+        println!(
+            "[Scheduler] job_id={} => chunk_index={} => dynamic_chunk={}",
+            job_id, cindex, dynamic_chunk
+        );
+
         Ok(Json(AssignChunkResponse {
             chunk_index: Some(cindex),
-            chunk_size: job.chunk_size,
+            chunk_size: dynamic_chunk,
             job_status: job.status.clone(),
         }))
     } else {
@@ -725,7 +813,7 @@ async fn cleanup_inactive_jobs(
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// chunk_reassign => 20× average chunk time
+// chunk_reassign => if chunk is overdue (time_limit=20× average_chunk_time)
 ///////////////////////////////////////////////////////////////////////////
 fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
     let time_limit = 20.0 * job.average_chunk_time;
@@ -743,6 +831,7 @@ fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
     for cidx in reassign_list {
         job.chunks_in_progress.remove(&cidx);
         job.killed_chunks.insert(cidx);
+        // step back next_chunk pointer if needed
         if cidx < job.next_chunk {
             job.next_chunk = cidx;
         }
