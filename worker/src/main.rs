@@ -19,16 +19,14 @@ use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{thread, time::Duration};
+use uuid::Uuid;
 
-///////////////////////////////////////
-// Worker Constants
-///////////////////////////////////////
+////////////////////////////////////////////////
+// Constants & Data
+////////////////////////////////////////////////
 const SCHEDULER_URL: &str = "https://127.0.0.1:8443";
 const SCHEDULER_CERT_PATH: &str = "certs/scheduler_cert.pem";
 
-///////////////////////////////////////
-// Data Structures
-///////////////////////////////////////
 #[derive(Debug, Serialize, Deserialize)]
 struct AvailableJobResponse {
     job_id: Option<String>,
@@ -39,6 +37,14 @@ struct AssignChunkResponse {
     chunk_index: Option<u64>,
     chunk_size: u64,
     job_status: String,
+    resolution: u32,
+    task_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MandelPixel {
+    index: u64,
+    color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,8 +52,9 @@ struct SubmitChunkRequest {
     worker_id: String,
     job_id: String,
     chunk_index: u64,
-    points_in_circle: u64,
+    points_in_circle: Option<u64>,
     chunk_points: u64,
+    mandelbrot_colors: Option<Vec<MandelPixel>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,11 +74,14 @@ struct RegisterWorkerResponse {
     assigned_worker_id: String,
 }
 
-///////////////////////////////////////
-// Main Worker
-///////////////////////////////////////
+////////////////////////////////////////////////
+// main
+////////////////////////////////////////////////
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Generate a unique worker ID
+    let worker_id = format!("worker-{}", Uuid::new_v4());
+
     // Build an HTTPS client in a loop
     let client = loop {
         match build_https_client().await {
@@ -84,8 +94,6 @@ async fn main() -> Result<()> {
             }
         }
     };
-
-    let worker_id = "my_single_worker".to_string();
 
     // Register the Worker in a loop
     loop {
@@ -103,7 +111,6 @@ async fn main() -> Result<()> {
     loop {
         match find_available_job(&client).await {
             Ok(Some(job_id)) => {
-                // For each job, try to get a chunk until none is returned
                 let chunk_data = match assign_chunk(&client, &job_id, &worker_id).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -122,27 +129,46 @@ async fn main() -> Result<()> {
 
                 let cindex = chunk_data.chunk_index.unwrap();
                 let cpoints = chunk_data.chunk_size;
-                println!(
-                    "[Worker] job_id={} => worker_id={} => chunk_index={} => chunk_size={}",
-                    job_id, worker_id, cindex, cpoints
-                );
+                // Changed line below:
+                println!("[Worker] job_id={} => chunk {} done", job_id, cindex);
 
-                // do Monte Carlo
-                let points_in_circle = do_monte_carlo(cpoints);
-
-                // submit
-                let sc_req = SubmitChunkRequest {
-                    worker_id: worker_id.clone(),
-                    job_id: job_id.clone(),
-                    chunk_index: cindex,
-                    points_in_circle,
-                    chunk_points: cpoints,
-                };
-                match submit_chunk(&client, &sc_req).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("[Worker] submit_chunk error: {:?}", e);
+                if chunk_data.task_type == "calculate_pi" {
+                    let points_in_circle = do_monte_carlo(cpoints);
+                    let sc_req = SubmitChunkRequest {
+                        worker_id: worker_id.clone(),
+                        job_id: job_id.clone(),
+                        chunk_index: cindex,
+                        points_in_circle: Some(points_in_circle),
+                        chunk_points: cpoints,
+                        mandelbrot_colors: None,
+                    };
+                    match submit_chunk(&client, &sc_req).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("[Worker] submit_chunk error: {:?}", e);
+                        }
                     }
+                } else if chunk_data.task_type == "calculate_mandelbrot" {
+                    let row_index = cindex as u32;
+                    let resolution = chunk_data.resolution;
+                    let row_colors = compute_mandel_row(row_index, resolution);
+
+                    let sc_req = SubmitChunkRequest {
+                        worker_id: worker_id.clone(),
+                        job_id: job_id.clone(),
+                        chunk_index: cindex,
+                        points_in_circle: None,
+                        chunk_points: cpoints,
+                        mandelbrot_colors: Some(row_colors),
+                    };
+                    match submit_chunk(&client, &sc_req).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("[Worker] submit_chunk error: {:?}", e);
+                        }
+                    }
+                } else {
+                    println!("[Worker] Unknown task_type={}", chunk_data.task_type);
                 }
 
                 thread::sleep(Duration::from_millis(200));
@@ -160,9 +186,9 @@ async fn main() -> Result<()> {
     }
 }
 
-///////////////////////////////////////
+////////////////////////////////////////////////
 // Helper Functions
-///////////////////////////////////////
+////////////////////////////////////////////////
 async fn build_https_client() -> Result<Client> {
     let ca = std::fs::read(SCHEDULER_CERT_PATH)
         .map_err(|e| anyhow!("Error reading certificate file: {:?}", e))?;
@@ -260,4 +286,71 @@ fn do_monte_carlo(n: u64) -> u64 {
         }
     }
     count
+}
+
+fn compute_mandel_row(row_index: u32, resolution: u32) -> Vec<MandelPixel> {
+    let width = resolution as f64;
+    let height = resolution as f64;
+
+    let mut row_data = Vec::with_capacity(resolution as usize);
+
+    for col_index in 0..resolution {
+        let x0 = -2.0 + 3.0 * (col_index as f64 / (width - 1.0));
+        let y0 = -1.5 + 3.0 * (row_index as f64 / (height - 1.0));
+
+        let color = mandel_color(x0, y0);
+        let pixel_index = (row_index as u64) * (resolution as u64) + (col_index as u64);
+
+        row_data.push(MandelPixel {
+            index: pixel_index,
+            color,
+        });
+    }
+    row_data
+}
+
+fn mandel_color(cx: f64, cy: f64) -> String {
+    let max_iter = 300u32;
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut iter = 0;
+    while x * x + y * y <= 4.0 && iter < max_iter {
+        let xtemp = x * x - y * y + cx;
+        y = 2.0 * x * y + cy;
+        x = xtemp;
+        iter += 1;
+    }
+    if iter >= max_iter {
+        "#000000".to_string()
+    } else {
+        let hue = (iter as f64 / max_iter as f64) * 360.0;
+        hsv_to_rgb_hex(hue, 1.0, 1.0)
+    }
+}
+
+fn hsv_to_rgb_hex(h: f64, s: f64, v: f64) -> String {
+    let c = s * v;
+    let hh = h / 60.0;
+    let x = c * (1.0 - ((hh % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = if hh >= 0.0 && hh < 1.0 {
+        (c, x, 0.0)
+    } else if hh >= 1.0 && hh < 2.0 {
+        (x, c, 0.0)
+    } else if hh >= 2.0 && hh < 3.0 {
+        (0.0, c, x)
+    } else if hh >= 3.0 && hh < 4.0 {
+        (0.0, x, c)
+    } else if hh >= 4.0 && hh < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = v - c;
+    let (r, g, b) = (r1 + m, g1 + m, b1 + m);
+
+    let ri = (r * 255.0).round() as u8;
+    let gi = (g * 255.0).round() as u8;
+    let bi = (b * 255.0).round() as u8;
+
+    format!("#{:02X}{:02X}{:02X}", ri, gi, bi)
 }

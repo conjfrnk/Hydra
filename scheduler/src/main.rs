@@ -59,17 +59,22 @@ struct WorkerStats {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct JobInfo {
     job_id: String,
-    status: String, // "in-progress", "paused", "finished", "error"
+    task_type: String, // "calculate_pi" or "calculate_mandelbrot"
+    status: String,    // "in-progress", "paused", "finished", "error"
     result: String,
     partial_result: String,
     percent_complete: f32,
 
-    points: u64,
-    chunk_size: u64, // base chunk size; used for clamping
+    points: u64,     // total "units" of work
+    chunk_size: u64, // base chunk size
     completed_chunks: u64,
     total_chunks: u64,
-    points_in_circle: u64,
-    points_total: u64,
+    points_in_circle: u64, // for Pi
+    points_total: u64,     // for Pi
+
+    // for Mandelbrot
+    resolution: u32,
+    mandel_pixels: HashMap<u64, String>, // index -> color hex
 
     created_at: u64,
     next_chunk: u64,
@@ -88,11 +93,21 @@ struct ChunkAssignment {
     assigned_at: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SamplePoint {
+    percent: f32,
+    approx_pi: f64,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateJobRequest {
     job_id: String,
     task_type: String,
     points: u64,
+
+    // optional for mandelbrot
+    #[serde(default)]
+    resolution: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,8 +140,15 @@ struct SubmitChunkRequest {
     worker_id: String,
     job_id: String,
     chunk_index: u64,
-    points_in_circle: u64,
-    chunk_points: u64,
+    points_in_circle: Option<u64>, // only for Pi
+    chunk_points: u64,             // total points (pixels or random points)
+    mandelbrot_colors: Option<Vec<MandelPixel>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MandelPixel {
+    index: u64,
+    color: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +164,7 @@ struct AvailableJobResponse {
 
 #[derive(Debug, Deserialize)]
 struct AssignChunkQuery {
-    worker_id: String, // e.g. "?worker_id=my_single_worker"
+    worker_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,6 +172,8 @@ struct AssignChunkResponse {
     chunk_index: Option<u64>,
     chunk_size: u64,
     job_status: String,
+    resolution: u32,
+    task_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,13 +184,8 @@ struct MarkErrorResponse {
 
 #[derive(Debug, Serialize)]
 struct HistoryResponse {
-    samples: Vec<SamplePoint>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct SamplePoint {
-    percent: f32,
-    approx_pi: f64,
+    samples: Vec<SamplePoint>, // for Pi
+    pixels: Vec<MandelPixel>,  // for Mandelbrot
 }
 
 /////////////////////////////////////
@@ -209,7 +228,6 @@ async fn main() -> Result<()> {
         .route("/api/register_worker", post(register_worker))
         .route("/api/submit_chunk", post(submit_chunk))
         .route("/api/available_job", get(available_job))
-        // now we require worker_id in the query string
         .route("/api/assign_chunk/:job_id", get(assign_chunk))
         .route("/api/mark_job_error/:job_id", post(mark_job_error))
         .route("/api/job_history/:job_id", get(get_job_history))
@@ -238,9 +256,9 @@ async fn main() -> Result<()> {
     }
 }
 
-/////////////////////////////////////
-// create_job => last_webapp_poll=now
-/////////////////////////////////////
+////////////////////////////////////////////////////
+// create_job => store task_type, resolution if needed
+////////////////////////////////////////////////////
 async fn create_job(
     State(state): State<AppState>,
     Json(payload): Json<CreateJobRequest>,
@@ -249,23 +267,45 @@ async fn create_job(
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
 
-    let base_chunk_size = 100_000;
-    let total_chunks = (payload.points + base_chunk_size - 1) / base_chunk_size;
     let now = current_timestamp();
+
+    // Default chunk_size
+    let base_chunk_size = 100_000;
+    let mut total_chunks = (payload.points + base_chunk_size - 1) / base_chunk_size;
+
+    // If this is Mandelbrot, treat chunk_size as "one row"
+    let mut chunk_size = base_chunk_size;
+    let mut resolution = payload.resolution;
+    let mut mandel_pixels = HashMap::new();
+
+    if payload.task_type == "calculate_mandelbrot" {
+        // each "chunk" will be 1 row => chunk_size = resolution
+        // total_chunks = resolution
+        if resolution < 1 {
+            resolution = 256;
+        }
+        chunk_size = resolution as u64;
+        total_chunks = resolution as u64;
+    }
 
     let job_info = JobInfo {
         job_id: payload.job_id.clone(),
+        task_type: payload.task_type.clone(),
         status: "in-progress".to_string(),
         result: "".to_string(),
         partial_result: "".to_string(),
         percent_complete: 0.0,
 
         points: payload.points,
-        chunk_size: base_chunk_size,
+        chunk_size,
         completed_chunks: 0,
         total_chunks,
         points_in_circle: 0,
         points_total: 0,
+
+        resolution,
+        mandel_pixels,
+
         created_at: now,
         next_chunk: 0,
 
@@ -275,12 +315,13 @@ async fn create_job(
         samples: Vec::new(),
         killed_chunks: HashSet::new(),
     };
+
     jobs.insert(payload.job_id.clone(), job_info);
     queue.push(payload.job_id.clone());
 
     println!(
-        "[Scheduler] Created job_id={} total_chunks={}",
-        payload.job_id, total_chunks
+        "[Scheduler] Created job_id={} task_type={} total_chunks={}",
+        payload.job_id, payload.task_type, total_chunks
     );
 
     Json(CreateJobResponse {
@@ -327,9 +368,9 @@ async fn get_job_status(
     }
 }
 
-/////////////////////////////////////
-// register_worker
-/////////////////////////////////////
+////////////////////////////////////////////////////
+// register_worker => store unique worker ID
+////////////////////////////////////////////////////
 async fn register_worker(
     State(state): State<AppState>,
     Json(payload): Json<RegisterWorkerRequest>,
@@ -354,9 +395,9 @@ async fn register_worker(
     })
 }
 
-/////////////////////////////////////
-// submit_chunk => measure time => update worker stats => partial result
-/////////////////////////////////////
+////////////////////////////////////////////////////
+// submit_chunk
+////////////////////////////////////////////////////
 async fn submit_chunk(
     State(state): State<AppState>,
     Json(payload): Json<SubmitChunkRequest>,
@@ -408,35 +449,74 @@ async fn submit_chunk(
             job.average_chunk_time = alpha * elapsed_sec + (1.0 - alpha) * job.average_chunk_time;
         }
 
-        job.completed_chunks += 1;
-        job.points_in_circle += payload.points_in_circle;
-        job.points_total += payload.chunk_points;
+        // handle the chunk's data
+        if job.task_type == "calculate_pi" {
+            let points_in_circle = payload.points_in_circle.unwrap_or(0);
+            job.completed_chunks += 1;
+            job.points_in_circle += points_in_circle;
+            job.points_total += payload.chunk_points;
 
-        let partial_pi = 4.0 * (job.points_in_circle as f64 / job.points_total as f64);
-        job.partial_result = format!("{:.6}", partial_pi);
-        job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
+            let partial_pi = 4.0 * (job.points_in_circle as f64 / job.points_total as f64);
+            job.partial_result = format!("{:.6}", partial_pi);
+            job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
 
-        if job.points_total >= job.points {
-            let final_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
-            job.samples.push(SamplePoint {
-                approx_pi: final_val,
-                percent: 100.0,
-            });
-            job.status = "finished".to_string();
-            job.result = job.partial_result.clone();
-            job.percent_complete = 100.0;
-            println!(
-                "[Scheduler] job_id={} => FINISHED, final pi={}",
-                payload.job_id, job.result
-            );
-            remove_from_queue(&mut queue, &payload.job_id);
-        } else {
-            println!(
-                "[Scheduler] job_id={} => partial pi={}, {}% done",
-                payload.job_id, job.partial_result, job.percent_complete
-            );
+            // check if done
+            if job.points_total >= job.points {
+                let final_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
+                job.samples.push(SamplePoint {
+                    approx_pi: final_val,
+                    percent: 100.0,
+                });
+                job.status = "finished".to_string();
+                job.result = job.partial_result.clone();
+                job.percent_complete = 100.0;
+                println!(
+                    "[Scheduler] job_id={} => FINISHED (Pi), final pi={}",
+                    payload.job_id, job.result
+                );
+                remove_from_queue(&mut queue, &payload.job_id);
+            } else {
+                println!(
+                    "[Scheduler] job_id={} => partial pi={}, {}% done",
+                    payload.job_id, job.partial_result, job.percent_complete
+                );
+            }
+        } else if job.task_type == "calculate_mandelbrot" {
+            // Each chunk = 1 row
+            job.completed_chunks += 1;
+            let row_points = payload.chunk_points; // should match resolution
+            job.points_total += row_points;
+
+            // incorporate color data
+            if let Some(colors) = &payload.mandelbrot_colors {
+                for px in colors {
+                    job.mandel_pixels.insert(px.index, px.color.clone());
+                }
+            }
+
+            job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
+
+            // check if done
+            if job.completed_chunks >= job.total_chunks {
+                job.status = "finished".to_string();
+                job.result = "Mandelbrot complete".to_string();
+                job.partial_result = "Done".to_string();
+                job.percent_complete = 100.0;
+                println!(
+                    "[Scheduler] job_id={} => FINISHED (Mandelbrot)",
+                    payload.job_id
+                );
+                remove_from_queue(&mut queue, &payload.job_id);
+            } else {
+                // MODIFIED HERE to just show "chunk done"
+                println!(
+                    "[Scheduler] job_id={} => chunk {} done, {}% done",
+                    payload.job_id, payload.chunk_index, job.percent_complete
+                );
+            }
         }
 
+        // Update worker stats
         let mut workers_map = state.workers.lock().unwrap();
         let updated_total = if let Some(w) = workers_map.get_mut(&payload.worker_id) {
             w.total_compute += 1;
@@ -478,9 +558,9 @@ async fn submit_chunk(
     }
 }
 
-/////////////////////////////////////
+////////////////////////////////////////////////////
 // available_job => skip paused/error/finished
-/////////////////////////////////////
+////////////////////////////////////////////////////
 async fn available_job(State(state): State<AppState>) -> Json<AvailableJobResponse> {
     let jobs = state.jobs.lock().unwrap();
     let queue = state.run_queue.lock().unwrap();
@@ -511,9 +591,9 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
     })
 }
 
-/////////////////////////////////////
-// assign_chunk => full per-worker approach
-/////////////////////////////////////
+////////////////////////////////////////////////////
+// assign_chunk
+////////////////////////////////////////////////////
 async fn assign_chunk(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -526,7 +606,6 @@ async fn assign_chunk(
     let worker_id = query.worker_id.clone();
 
     if let Some(job) = jobs.get_mut(&job_id) {
-        // inactivity => only webapp polls matter => last_webapp_poll
         let elapsed = now.saturating_sub(job.last_webapp_poll);
         if job.status == "in-progress" && elapsed > 10 {
             job.status = "paused".to_string();
@@ -539,6 +618,8 @@ async fn assign_chunk(
                 chunk_index: None,
                 chunk_size: 0,
                 job_status: "paused".to_string(),
+                resolution: job.resolution,
+                task_type: job.task_type.clone(),
             }));
         }
 
@@ -548,6 +629,8 @@ async fn assign_chunk(
                     chunk_index: None,
                     chunk_size: 0,
                     job_status: "finished".to_string(),
+                    resolution: job.resolution,
+                    task_type: job.task_type.clone(),
                 }));
             }
             "error" => {
@@ -555,6 +638,8 @@ async fn assign_chunk(
                     chunk_index: None,
                     chunk_size: 0,
                     job_status: "error".to_string(),
+                    resolution: job.resolution,
+                    task_type: job.task_type.clone(),
                 }));
             }
             "paused" => {
@@ -562,6 +647,8 @@ async fn assign_chunk(
                     chunk_index: None,
                     chunk_size: 0,
                     job_status: "paused".to_string(),
+                    resolution: job.resolution,
+                    task_type: job.task_type.clone(),
                 }));
             }
             _ => {}
@@ -576,6 +663,8 @@ async fn assign_chunk(
                 chunk_index: None,
                 chunk_size: 0,
                 job_status: "finished".to_string(),
+                resolution: job.resolution,
+                task_type: job.task_type.clone(),
             }));
         }
 
@@ -589,48 +678,36 @@ async fn assign_chunk(
             },
         );
 
-        // figure out how many points remain
+        // dynamic chunk sizing
         let points_remaining = job.points.saturating_sub(job.points_total);
+        let mut dynamic_chunk = job.chunk_size;
 
         // fetch the requesting worker's stats
         let workers_map = state.workers.lock().unwrap();
         let maybe_stats = workers_map.get(&worker_id);
 
-        // default chunk to job's base
-        let mut dynamic_chunk = job.chunk_size;
-
-        if let Some(w) = maybe_stats {
-            // if worker has some throughput data, tailor chunk just for them
-            if w.avg_points_per_sec > 0.0 {
-                let target_time = 2.0; // ~2 seconds
-                let predicted_chunk = (w.avg_points_per_sec * target_time) as u64;
-
-                // clamp around base chunk size
-                if predicted_chunk < job.chunk_size / 2 {
-                    dynamic_chunk = job.chunk_size / 2;
-                } else if predicted_chunk > job.chunk_size * 2 {
-                    dynamic_chunk = job.chunk_size * 2;
-                } else {
-                    dynamic_chunk = predicted_chunk;
+        if job.task_type == "calculate_pi" {
+            if let Some(w) = maybe_stats {
+                if w.avg_points_per_sec > 0.0 {
+                    let target_time = 2.0;
+                    let predicted_chunk = (w.avg_points_per_sec * target_time) as u64;
+                    if predicted_chunk < job.chunk_size / 2 {
+                        dynamic_chunk = job.chunk_size / 2;
+                    } else if predicted_chunk > job.chunk_size * 2 {
+                        dynamic_chunk = job.chunk_size * 2;
+                    } else {
+                        dynamic_chunk = predicted_chunk;
+                    }
                 }
             }
-        }
-
-        // do not overshoot remainder
-        if dynamic_chunk > points_remaining {
-            dynamic_chunk = points_remaining;
-        }
-
-        // shrink near the end
-        if job.percent_complete > 90.0 {
-            let leftover = points_remaining;
-            if leftover < dynamic_chunk {
-                dynamic_chunk = leftover;
+            if dynamic_chunk > points_remaining {
+                dynamic_chunk = points_remaining;
             }
-        }
-
-        if dynamic_chunk < 1 {
-            dynamic_chunk = 1;
+            if dynamic_chunk < 1 {
+                dynamic_chunk = 1;
+            }
+        } else if job.task_type == "calculate_mandelbrot" {
+            dynamic_chunk = job.resolution as u64;
         }
 
         println!(
@@ -642,15 +719,17 @@ async fn assign_chunk(
             chunk_index: Some(cindex),
             chunk_size: dynamic_chunk,
             job_status: job.status.clone(),
+            resolution: job.resolution,
+            task_type: job.task_type.clone(),
         }))
     } else {
         Err((StatusCode::NOT_FOUND, "Job not found"))
     }
 }
 
-/////////////////////////////////////
+////////////////////////////////////////////////////
 // mark_job_error
-/////////////////////////////////////
+////////////////////////////////////////////////////
 async fn mark_job_error(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -673,6 +752,7 @@ async fn mark_job_error(
             let now = current_timestamp();
             let new_job = JobInfo {
                 job_id: job_id.clone(),
+                task_type: "unknown".to_string(),
                 status: "error".to_string(),
                 result: "".to_string(),
                 partial_result: "".to_string(),
@@ -683,6 +763,8 @@ async fn mark_job_error(
                 total_chunks: 0,
                 points_in_circle: 0,
                 points_total: 0,
+                resolution: 0,
+                mandel_pixels: HashMap::new(),
                 created_at: now,
                 next_chunk: 0,
                 average_chunk_time: 5.0,
@@ -706,38 +788,62 @@ async fn mark_job_error(
     }
 }
 
-/////////////////////////////////////
-// get_job_history
-/////////////////////////////////////
+////////////////////////////////////////////////////
+// get_job_history => for Pi => samples, for Mandelbrot => partial pixel data
+////////////////////////////////////////////////////
 async fn get_job_history(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
     let jobs = state.jobs.lock().unwrap();
     if let Some(job) = jobs.get(&job_id) {
-        let resp = HistoryResponse {
-            samples: job.samples.clone(),
-        };
-        (StatusCode::OK, Json(resp))
+        if job.task_type == "calculate_pi" {
+            let resp = HistoryResponse {
+                samples: job.samples.clone(),
+                pixels: vec![],
+            };
+            (StatusCode::OK, Json(resp))
+        } else if job.task_type == "calculate_mandelbrot" {
+            let mut all_pixels = Vec::new();
+            for (idx, col) in &job.mandel_pixels {
+                all_pixels.push(MandelPixel {
+                    index: *idx,
+                    color: col.clone(),
+                });
+            }
+            all_pixels.sort_by_key(|p| p.index);
+            let resp = HistoryResponse {
+                samples: vec![],
+                pixels: all_pixels,
+            };
+            (StatusCode::OK, Json(resp))
+        } else {
+            let resp = HistoryResponse {
+                samples: vec![],
+                pixels: vec![],
+            };
+            (StatusCode::OK, Json(resp))
+        }
     } else {
         (
             StatusCode::NOT_FOUND,
             Json(HistoryResponse {
                 samples: Vec::new(),
+                pixels: Vec::new(),
             }),
         )
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////
 // Cleanup => 10s => paused, 300s => error
-///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////
 async fn cleanup_inactive_jobs(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     run_queue: Arc<Mutex<Vec<String>>>,
 ) {
-    const PAUSE_THRESHOLD: u64 = 10;
-    const DELETE_THRESHOLD: u64 = 300;
+    const PAUSE_THRESHOLD: u64 = 20;
+    const DELETE_THRESHOLD: u64 = 600;
 
     loop {
         {
@@ -752,7 +858,7 @@ async fn cleanup_inactive_jobs(
                         if elapsed > PAUSE_THRESHOLD && elapsed < DELETE_THRESHOLD {
                             job.status = "paused".to_string();
                             println!(
-                                "[Scheduler] job_id={} => paused after {}s (cleanup, no webapp poll)",
+                                "[Scheduler] job_id={} => paused after {}s (cleanup)",
                                 job_id, elapsed
                             );
                             remove_from_queue(&mut queue, job_id);
@@ -800,9 +906,6 @@ async fn cleanup_inactive_jobs(
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
-// chunk_reassign => kill & reassign chunks that have run too long
-///////////////////////////////////////////////////////////////////////////
 fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
     let time_limit = 20.0 * job.average_chunk_time;
     let mut reassign_list = vec![];
@@ -825,15 +928,18 @@ fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////
 // partial pi sampling => every 500ms
-///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////
 async fn sampling_task(jobs: Arc<Mutex<HashMap<String, JobInfo>>>) {
     loop {
         {
             let mut map = jobs.lock().unwrap();
             for (_jid, job) in map.iter_mut() {
-                if job.status == "in-progress" && job.points_total > 0 {
+                if job.status == "in-progress"
+                    && job.task_type == "calculate_pi"
+                    && job.points_total > 0
+                {
                     let pi_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
                     let pct = job.percent_complete;
                     job.samples.push(SamplePoint {
@@ -847,9 +953,6 @@ async fn sampling_task(jobs: Arc<Mutex<HashMap<String, JobInfo>>>) {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
-// Helpers
-///////////////////////////////////////////////////////////////////////////
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

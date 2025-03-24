@@ -1,7 +1,5 @@
-<!DOCTYPE html>
-
 <!--
-  Hydra - HTML Pi Calculation Template
+  Hydra - Index Page
   Copyright (C) 2025 Connor Frank
 
   This program is free software: you can redistribute it and/or modify
@@ -18,268 +16,23 @@
   along with this program. If not, see <https://www.gnu.org/licenses/>.
 -->
 
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>Pi Calculation</title>
+  <title>Hydra - Main</title>
   <style>
     body { font-family: sans-serif; margin: 20px; }
-    #progress { margin-top: 20px; }
-    #chart-container {
-      width: 80%;
-      max-width: 800px;
-      margin: 30px auto;
-    }
   </style>
-  <!-- Chart.js from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <h1>Pi Calculation</h1>
+  <h1>Hydra Distributed Computing</h1>
 
-  <form id="piForm">
-    <label for="points">Number of random points:</label>
-    <input type="number" id="points" name="points" min="1" step="any" value="1000000000">
-    <button type="submit">Calculate</button>
-  </form>
+  <p>Welcome! Please pick a calculation:</p>
 
-  <div id="progress"></div>
-
-  <div id="chart-container">
-    <canvas id="chart"></canvas>
-  </div>
-
-  <script>
-    function formatHMS(totalSeconds) {
-      totalSeconds = Math.floor(totalSeconds);
-      const hh = Math.floor(totalSeconds / 3600);
-      const remainder = totalSeconds % 3600;
-      const mm = Math.floor(remainder / 60);
-      const ss = remainder % 60;
-
-      return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
-    }
-
-    let pollWorker = new Worker("/static/heartbeatWorker.js");
-    let currentJobId = "";
-    let startTime = 0;
-    let currentPercent = 0;
-
-    const ACTUAL_PI = 3.141592653589793;
-    const ctx = document.getElementById('chart').getContext('2d');
-
-    const progressMarkerPlugin = {
-      id: 'progressMarkerPlugin',
-      afterDatasetsDraw(chart) {
-        const xScale = chart.scales.x;
-        const yScale = chart.scales.y;
-        if (!xScale || !yScale) return;
-
-        const minY = yScale.min;
-        const xPos = xScale.getPixelForValue(currentPercent);
-        const yPos = yScale.getPixelForValue(minY);
-
-        const ctx = chart.ctx;
-        ctx.save();
-        ctx.fillStyle = 'blue';
-        ctx.beginPath();
-        ctx.arc(xPos, yPos, 5, 0, 2 * Math.PI);
-        ctx.fill();
-        ctx.restore();
-      }
-    };
-
-    const chart = new Chart(ctx, {
-      type: 'line',
-      data: {
-        datasets: [
-          {
-            label: 'Pi Approximation',
-            data: [],
-            borderColor: 'blue',
-            borderWidth: 2,
-            fill: false,
-            tension: 0.1,
-            pointRadius: 0
-          },
-          {
-            label: 'Actual Pi',
-            data: [
-              {x: 0,   y: ACTUAL_PI},
-              {x: 100, y: ACTUAL_PI}
-            ],
-            borderColor: 'red',
-            borderDash: [10, 5],
-            borderWidth: 2,
-            fill: false,
-            pointRadius: 0
-          }
-        ]
-      },
-      options: {
-        animation: false,
-        scales: {
-          x: {
-            type: 'linear',
-            position: 'bottom',
-            title: {
-              display: true,
-              text: '% Complete'
-            },
-            min: 0,
-            max: 100,
-            ticks: { stepSize: 10 }
-          },
-          y: {
-            title: {
-              display: true,
-              text: 'Pi Value'
-            }
-          }
-        }
-      },
-      plugins: [progressMarkerPlugin]
-    });
-
-    const progressDiv = document.getElementById('progress');
-    const pointsInput = document.getElementById('points');
-    pointsInput.addEventListener('keydown', (e) => {
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        let val = parseInt(pointsInput.value || "1", 10);
-        val = val * 10;
-        pointsInput.value = val;
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        let val = parseInt(pointsInput.value || "1", 10);
-        val = Math.max(1, Math.floor(val / 10));
-        pointsInput.value = val;
-      }
-    });
-
-    pollWorker.onmessage = function(e) {
-      let msg = e.data;
-      if (msg.type === "STATUS") {
-        if (msg.jobId !== currentJobId) return;
-        let sData = msg.data;
-
-        if (sData.status === "finished") {
-          let finalVal = parseFloat(sData.result || sData.partial_result);
-          let endTime = Date.now();
-          let elapsedMs = endTime - startTime;
-          let elapsedSec = elapsedMs / 1000;
-          let hms = formatHMS(elapsedSec);
-
-          progressDiv.textContent = `Done! Approx pi: ${finalVal} (${hms})`;
-          chart.data.datasets[0].data.push({ x: 100, y: finalVal });
-          chart.update();
-
-          pollWorker.postMessage({ type: "STOP" });
-          currentJobId = "";
-
-        } else if (sData.status === "in-progress") {
-          let partialVal = parseFloat(sData.partial_result);
-          let pct = parseFloat(sData.percent_complete);
-          chart.data.datasets[0].data.push({ x: pct, y: partialVal });
-          currentPercent = pct;
-          chart.update();
-
-          let elapsedSec = (Date.now() - startTime) / 1000;
-          let fraction = pct / 100;
-          let timeLeftStr = "";
-          if (fraction > 0.01) {
-            let totalSecEst = elapsedSec / fraction;
-            let remainSec = totalSecEst - elapsedSec;
-            timeLeftStr = ` ~${formatHMS(remainSec)} left`;
-          }
-          progressDiv.textContent =
-            `Job in progress... Approx pi: ${sData.partial_result} ` +
-            `(${pct.toFixed(2)}% done)${timeLeftStr}`;
-
-        } else if (sData.status === "error") {
-          progressDiv.textContent = "Job encountered an error or was canceled.";
-          pollWorker.postMessage({ type: "STOP" });
-          currentJobId = "";
-        } else {
-          progressDiv.textContent = "Unexpected status from server.";
-          pollWorker.postMessage({ type: "STOP" });
-          currentJobId = "";
-        }
-
-      } else if (msg.type === "ERROR") {
-        console.warn("[Worker] Poll error =>", msg.info);
-      }
-    };
-
-    document.addEventListener('visibilitychange', async () => {
-      if (!document.hidden && currentJobId) {
-        try {
-          let samples = await fetchJobHistory(currentJobId);
-          chart.data.datasets[0].data = samples.map(s => ({
-            x: s.percent,
-            y: s.approx_pi
-          }));
-          chart.update();
-        } catch(e) {
-          console.warn("Catch-up error =>", e);
-        }
-      }
-    });
-
-    async function fetchJobHistory(jobId) {
-      let resp = await fetch(`/job_history/${jobId}`);
-      if (!resp.ok) {
-        throw new Error(`History fetch error: ${resp.status} => ${await resp.text()}`);
-      }
-      let data = await resp.json();
-      return data.samples || [];
-    }
-
-    const form = document.getElementById('piForm');
-    form.addEventListener('submit', async (evt) => {
-      evt.preventDefault();
-      const points = document.getElementById('points').value;
-
-      if (currentJobId) {
-        try {
-          await fetch("/mark_old_job", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ old_job_id: currentJobId })
-          });
-          pollWorker.postMessage({ type: "STOP" });
-        } catch(e) {
-          console.warn("Error killing old job =>", e);
-        }
-        currentJobId = "";
-      }
-
-      progressDiv.textContent = "Starting calculation...";
-      let createResp = await fetch("/start_job", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ points })
-      });
-      if (!createResp.ok) {
-        progressDiv.textContent = "Error starting job.";
-        console.error("Error start job =>", await createResp.text());
-        return;
-      }
-      let createData = await createResp.json();
-      currentJobId = createData.job_id;
-
-      chart.data.datasets[0].data = [];
-      chart.data.datasets[1].data = [
-        { x: 0,   y: ACTUAL_PI },
-        { x: 100, y: ACTUAL_PI }
-      ];
-      chart.update();
-      currentPercent = 0;
-      startTime = Date.now();
-
-      progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
-      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 1000 });
-    });
-  </script>
+  <ul>
+    <li><a href="/pi">Calculate Pi</a></li>
+    <li><a href="/mandelbrot">Calculate Mandelbrot</a></li>
+  </ul>
 </body>
 </html>

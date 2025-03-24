@@ -24,19 +24,51 @@ app = Flask(__name__)
 SCHEDULER_URL = "https://127.0.0.1:8443"
 SCHEDULER_CERT = os.path.join("certs", "scheduler_cert.pem")
 
+# We store local status of each job to avoid spamming the scheduler unnecessarily
 job_data = {}
 
 
+#################################################
+# Landing Page
+#################################################
 @app.route("/")
-def index():
+def home():
+    """
+    Simple landing page with links to /pi and /mandelbrot
+    """
     return render_template("index.html")
 
 
+#################################################
+# Pi Subpage
+#################################################
+@app.route("/pi")
+def pi_page():
+    """
+    Page for Pi calculation (moved from the old index.html).
+    """
+    return render_template("pi.html")
+
+
+#################################################
+# Mandelbrot Subpage
+#################################################
+@app.route("/mandelbrot")
+def mandelbrot_page():
+    """
+    Page for Mandelbrot calculation.
+    """
+    return render_template("mandelbrot.html")
+
+
+#################################################
+# Mark Old Job (common)
+#################################################
 @app.route("/mark_old_job", methods=["POST"])
 def mark_old_job():
     """
-    Kills exactly one old job. The front-end calls this if its `currentJobId` is in progress,
-    so we forcibly mark it as error on the Scheduler side.
+    Kills exactly one old job. The front-end calls this if its `currentJobId` is in progress.
+    So we forcibly mark it as error on the Scheduler side.
     """
     data = request.get_json()
     if not data or "old_job_id" not in data:
@@ -57,19 +89,26 @@ def mark_old_job():
     return jsonify({"status": "old job killed"}), 200
 
 
+#################################################
+# Start Job (common) => Pi or Mandelbrot
+#################################################
 @app.route("/start_job", methods=["POST"])
 def start_job():
     """
     Creates a brand-new job on the scheduler.
     The front-end calls /mark_old_job first if needed.
+    We expect JSON like:
+        { "task_type": "calculate_pi", "points": ... } OR
+        { "task_type": "calculate_mandelbrot", "resolution": ... }
     """
     data = request.get_json()
-    if not data or "points" not in data:
-        return jsonify({"error": "Missing 'points'"}), 400
+    if not data or "task_type" not in data:
+        return jsonify({"error": "Missing 'task_type'"}), 400
 
-    points = data["points"]
+    task_type = data["task_type"]
     job_id = str(uuid.uuid4())
 
+    # Create local job record
     job_data[job_id] = {
         "status": "in-progress",
         "result": "",
@@ -77,13 +116,29 @@ def start_job():
         "percent_complete": 0.0,
     }
 
+    # Build request to Scheduler
+    payload = {"job_id": job_id, "task_type": task_type}
+
+    if task_type == "calculate_pi":
+        if "points" not in data:
+            return jsonify({"error": "Missing 'points' for Pi"}), 400
+        payload["points"] = int(data["points"])
+
+    elif task_type == "calculate_mandelbrot":
+        if "resolution" not in data:
+            return jsonify({"error": "Missing 'resolution' for Mandelbrot"}), 400
+        # We'll store the total pixel count in "points" to reuse the chunk logic
+        # e.g. points = resolution * resolution
+        resolution = int(data["resolution"])
+        payload["points"] = resolution * resolution
+        payload["resolution"] = resolution
+
+    else:
+        return jsonify({"error": f"Unknown task_type: {task_type}"}), 400
+
     try:
         create_url = f"{SCHEDULER_URL}/api/create_job"
-        resp = requests.post(
-            create_url,
-            json={"job_id": job_id, "task_type": "calculate_pi", "points": int(points)},
-            verify=SCHEDULER_CERT,
-        )
+        resp = requests.post(create_url, json=payload, verify=SCHEDULER_CERT)
         print(f"[WebApp] Scheduler create_job => status_code={resp.status_code}")
         resp.raise_for_status()
     except Exception as e:
@@ -93,10 +148,13 @@ def start_job():
     return jsonify({"job_id": job_id}), 200
 
 
+#################################################
+# Job Status
+#################################################
 @app.route("/job_status/<job_id>", methods=["GET"])
 def job_status(job_id):
     """
-    Poll the scheduler for the latest status and store it locally.
+    Poll the scheduler for the latest status. Return the combined info.
     """
     if job_id not in job_data:
         return jsonify({"error": "Unknown job_id"}), 404
@@ -119,10 +177,14 @@ def job_status(job_id):
     return jsonify(job_data[job_id])
 
 
+#################################################
+# Job History => Pi or partial Mandelbrot data
+#################################################
 @app.route("/job_history/<job_id>", methods=["GET"])
 def job_history(job_id):
     """
-    Returns the entire sample list for the given job from the Scheduler
+    For Pi: returns the entire sample list
+    For Mandelbrot: returns partial pixel data
     """
     try:
         url = f"{SCHEDULER_URL}/api/job_history/{job_id}"
