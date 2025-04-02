@@ -212,6 +212,7 @@ async fn main() -> Result<()> {
 
     // Build Axum app
     let app = Router::new()
+        .route("/", get(health_ok))
         .route("/api/create_job", post(create_job))
         .route("/api/job_status/:job_id", get(get_job_status))
         .route("/api/register_worker", post(register_worker))
@@ -731,7 +732,7 @@ async fn mark_job_error(
                 chunks_in_progress: HashMap::new(),
                 last_webapp_poll: now,
                 samples: Vec::new(),
-                killed_chunks: std::collections::HashSet::new(),
+                killed_chunks: HashSet::new(),
             };
             jobs.insert(job_id.clone(), new_job);
             remove_from_queue(&mut queue, &job_id);
@@ -910,4 +911,8 @@ fn remove_from_queue(queue: &mut Vec<String>, job_id: &str) {
     if let Some(pos) = queue.iter().position(|x| x == job_id) {
         queue.remove(pos);
     }
+}
+
+async fn health_ok() -> impl IntoResponse {
+    (StatusCode::OK, "OK\n")
 }
