@@ -22,22 +22,19 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hyper::server::conn::Http;
-use rustls_pemfile;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::{
     collections::{HashMap, HashSet},
-    io::BufReader,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::{Certificate, PrivateKey};
+use tower::ServiceExt; // for .serve
 
 /////////////////////////////////////
-// AppState, Data
+// AppState, Data (Unchanged)
 /////////////////////////////////////
 
 #[derive(Clone)]
@@ -65,23 +62,20 @@ struct JobInfo {
     partial_result: String,
     percent_complete: f32,
 
-    points: u64,     // total "units" of work
-    chunk_size: u64, // base chunk size
+    points: u64,
+    chunk_size: u64,
     completed_chunks: u64,
     total_chunks: u64,
-    points_in_circle: u64, // for Pi
-    points_total: u64,     // for Pi
+    points_in_circle: u64,
+    points_total: u64,
 
-    // for Mandelbrot
     resolution: u32,
-    mandel_pixels: HashMap<u64, String>, // index -> color hex
+    mandel_pixels: HashMap<u64, String>,
 
     created_at: u64,
     next_chunk: u64,
-
     average_chunk_time: f64,
     chunks_in_progress: HashMap<u64, ChunkAssignment>,
-
     last_webapp_poll: u64,
     samples: Vec<SamplePoint>,
     killed_chunks: HashSet<u64>,
@@ -104,8 +98,6 @@ struct CreateJobRequest {
     job_id: String,
     task_type: String,
     points: u64,
-
-    // optional for mandelbrot
     #[serde(default)]
     resolution: u32,
 }
@@ -140,8 +132,8 @@ struct SubmitChunkRequest {
     worker_id: String,
     job_id: String,
     chunk_index: u64,
-    points_in_circle: Option<u64>, // only for Pi
-    chunk_points: u64,             // total points (pixels or random points)
+    points_in_circle: Option<u64>,
+    chunk_points: u64,
     mandelbrot_colors: Option<Vec<MandelPixel>>,
 }
 
@@ -184,8 +176,8 @@ struct MarkErrorResponse {
 
 #[derive(Debug, Serialize)]
 struct HistoryResponse {
-    samples: Vec<SamplePoint>, // for Pi
-    pixels: Vec<MandelPixel>,  // for Mandelbrot
+    samples: Vec<SamplePoint>,
+    pixels: Vec<MandelPixel>,
 }
 
 /////////////////////////////////////
@@ -193,6 +185,9 @@ struct HistoryResponse {
 /////////////////////////////////////
 #[tokio::main]
 async fn main() -> Result<()> {
+    let env = env::var("HYDRA_ENV").unwrap_or_else(|_| "development".to_string());
+    println!("[Scheduler] Running in HYDRA_ENV={}", env);
+
     let state = AppState {
         jobs: Arc::new(Mutex::new(HashMap::new())),
         workers: Arc::new(Mutex::new(HashMap::new())),
@@ -200,15 +195,13 @@ async fn main() -> Result<()> {
         round_counter: Arc::new(Mutex::new(0)),
     };
 
-    // sampling partial Pi every 500ms
+    // periodic tasks
     {
         let sampling_jobs = state.jobs.clone();
         tokio::spawn(async move {
             sampling_task(sampling_jobs).await;
         });
     }
-
-    // background => after 10s => paused, after 300s => error
     {
         let jobs_for_cleanup = state.jobs.clone();
         let queue_for_cleanup = state.run_queue.clone();
@@ -217,11 +210,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    println!("[Scheduler] Loading TLS certs/keys");
-    let certs = load_certs("certs/scheduler_cert.pem")?;
-    let key = load_private_key("certs/scheduler_key.pem")?;
-    let tls_config = build_tls_config(certs, key)?;
-
+    // Build Axum app
     let app = Router::new()
         .route("/api/create_job", post(create_job))
         .route("/api/job_status/:job_id", get(get_job_status))
@@ -233,31 +222,34 @@ async fn main() -> Result<()> {
         .route("/api/job_history/:job_id", get(get_job_history))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8443));
-    println!("[Scheduler] Binding to https://{}", addr);
-    let listener = TcpListener::bind(addr).await?;
-    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    // In PRODUCTION, we bind to 0.0.0.0:8443 (plaintext) so the ALB can connect
+    // In DEV, we might just bind to 127.0.0.1:8443
+    let addr: SocketAddr = if env.to_lowercase() == "production" {
+        SocketAddr::from(([0, 0, 0, 0], 8443))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], 8443))
+    };
 
-    println!("[Scheduler] Now listening...");
+    println!("[Scheduler] Binding to {}", addr);
+    // Just do plain HTTP here, no TLS
+    let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
         let app_clone = app.clone();
+        // spawn a task per connection
         tokio::spawn(async move {
-            match acceptor.accept(stream).await {
-                Ok(tls_stream) => {
-                    let _ = Http::new().serve_connection(tls_stream, app_clone).await;
-                }
-                Err(e) => {
-                    eprintln!("[Scheduler] TLS handshake error: {:?}", e);
-                }
+            if let Err(e) = axum::Server::builder(stream)
+                .serve(app_clone.into_make_service())
+                .await
+            {
+                eprintln!("[Scheduler] server error: {:?}", e);
             }
         });
     }
 }
 
 ////////////////////////////////////////////////////
-// create_job => store task_type, resolution if needed
+// The rest is the same logic
 ////////////////////////////////////////////////////
 async fn create_job(
     State(state): State<AppState>,
@@ -268,19 +260,14 @@ async fn create_job(
     let mut queue = state.run_queue.lock().unwrap();
 
     let now = current_timestamp();
-
-    // Default chunk_size
     let base_chunk_size = 100_000;
     let mut total_chunks = (payload.points + base_chunk_size - 1) / base_chunk_size;
 
-    // If this is Mandelbrot, treat chunk_size as "one row"
     let mut chunk_size = base_chunk_size;
     let mut resolution = payload.resolution;
     let mut mandel_pixels = HashMap::new();
 
     if payload.task_type == "calculate_mandelbrot" {
-        // each "chunk" will be 1 row => chunk_size = resolution
-        // total_chunks = resolution
         if resolution < 1 {
             resolution = 256;
         }
@@ -302,13 +289,11 @@ async fn create_job(
         total_chunks,
         points_in_circle: 0,
         points_total: 0,
-
         resolution,
         mandel_pixels,
 
         created_at: now,
         next_chunk: 0,
-
         average_chunk_time: 5.0,
         chunks_in_progress: HashMap::new(),
         last_webapp_poll: now,
@@ -330,9 +315,6 @@ async fn create_job(
     })
 }
 
-/////////////////////////////////////
-// get_job_status => update last_webapp_poll
-/////////////////////////////////////
 async fn get_job_status(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -368,9 +350,6 @@ async fn get_job_status(
     }
 }
 
-////////////////////////////////////////////////////
-// register_worker => store unique worker ID
-////////////////////////////////////////////////////
 async fn register_worker(
     State(state): State<AppState>,
     Json(payload): Json<RegisterWorkerRequest>,
@@ -395,9 +374,6 @@ async fn register_worker(
     })
 }
 
-////////////////////////////////////////////////////
-// submit_chunk
-////////////////////////////////////////////////////
 async fn submit_chunk(
     State(state): State<AppState>,
     Json(payload): Json<SubmitChunkRequest>,
@@ -449,7 +425,6 @@ async fn submit_chunk(
             job.average_chunk_time = alpha * elapsed_sec + (1.0 - alpha) * job.average_chunk_time;
         }
 
-        // handle the chunk's data
         if job.task_type == "calculate_pi" {
             let points_in_circle = payload.points_in_circle.unwrap_or(0);
             job.completed_chunks += 1;
@@ -460,7 +435,6 @@ async fn submit_chunk(
             job.partial_result = format!("{:.6}", partial_pi);
             job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
 
-            // check if done
             if job.points_total >= job.points {
                 let final_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
                 job.samples.push(SamplePoint {
@@ -482,12 +456,10 @@ async fn submit_chunk(
                 );
             }
         } else if job.task_type == "calculate_mandelbrot" {
-            // Each chunk = 1 row
             job.completed_chunks += 1;
-            let row_points = payload.chunk_points; // should match resolution
+            let row_points = payload.chunk_points;
             job.points_total += row_points;
 
-            // incorporate color data
             if let Some(colors) = &payload.mandelbrot_colors {
                 for px in colors {
                     job.mandel_pixels.insert(px.index, px.color.clone());
@@ -495,8 +467,6 @@ async fn submit_chunk(
             }
 
             job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
-
-            // check if done
             if job.completed_chunks >= job.total_chunks {
                 job.status = "finished".to_string();
                 job.result = "Mandelbrot complete".to_string();
@@ -508,7 +478,6 @@ async fn submit_chunk(
                 );
                 remove_from_queue(&mut queue, &payload.job_id);
             } else {
-                // MODIFIED HERE to just show "chunk done"
                 println!(
                     "[Scheduler] job_id={} => chunk {} done, {}% done",
                     payload.job_id, payload.chunk_index, job.percent_complete
@@ -516,7 +485,6 @@ async fn submit_chunk(
             }
         }
 
-        // Update worker stats
         let mut workers_map = state.workers.lock().unwrap();
         let updated_total = if let Some(w) = workers_map.get_mut(&payload.worker_id) {
             w.total_compute += 1;
@@ -558,9 +526,6 @@ async fn submit_chunk(
     }
 }
 
-////////////////////////////////////////////////////
-// available_job => skip paused/error/finished
-////////////////////////////////////////////////////
 async fn available_job(State(state): State<AppState>) -> Json<AvailableJobResponse> {
     let jobs = state.jobs.lock().unwrap();
     let queue = state.run_queue.lock().unwrap();
@@ -591,9 +556,6 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
     })
 }
 
-////////////////////////////////////////////////////
-// assign_chunk
-////////////////////////////////////////////////////
 async fn assign_chunk(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -678,11 +640,9 @@ async fn assign_chunk(
             },
         );
 
-        // dynamic chunk sizing
         let points_remaining = job.points.saturating_sub(job.points_total);
         let mut dynamic_chunk = job.chunk_size;
 
-        // fetch the requesting worker's stats
         let workers_map = state.workers.lock().unwrap();
         let maybe_stats = workers_map.get(&worker_id);
 
@@ -727,9 +687,6 @@ async fn assign_chunk(
     }
 }
 
-////////////////////////////////////////////////////
-// mark_job_error
-////////////////////////////////////////////////////
 async fn mark_job_error(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -771,7 +728,7 @@ async fn mark_job_error(
                 chunks_in_progress: HashMap::new(),
                 last_webapp_poll: now,
                 samples: Vec::new(),
-                killed_chunks: HashSet::new(),
+                killed_chunks: std::collections::HashSet::new(),
             };
             jobs.insert(job_id.clone(), new_job);
             remove_from_queue(&mut queue, &job_id);
@@ -788,9 +745,6 @@ async fn mark_job_error(
     }
 }
 
-////////////////////////////////////////////////////
-// get_job_history => for Pi => samples, for Mandelbrot => partial pixel data
-////////////////////////////////////////////////////
 async fn get_job_history(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -804,13 +758,14 @@ async fn get_job_history(
             };
             (StatusCode::OK, Json(resp))
         } else if job.task_type == "calculate_mandelbrot" {
-            let mut all_pixels = Vec::new();
-            for (idx, col) in &job.mandel_pixels {
-                all_pixels.push(MandelPixel {
+            let mut all_pixels: Vec<MandelPixel> = job
+                .mandel_pixels
+                .iter()
+                .map(|(idx, col)| MandelPixel {
                     index: *idx,
                     color: col.clone(),
-                });
-            }
+                })
+                .collect();
             all_pixels.sort_by_key(|p| p.index);
             let resp = HistoryResponse {
                 samples: vec![],
@@ -835,9 +790,6 @@ async fn get_job_history(
     }
 }
 
-////////////////////////////////////////////////////
-// Cleanup => 10s => paused, 300s => error
-////////////////////////////////////////////////////
 async fn cleanup_inactive_jobs(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     run_queue: Arc<Mutex<Vec<String>>>,
@@ -857,10 +809,7 @@ async fn cleanup_inactive_jobs(
                         let elapsed = now.saturating_sub(job.last_webapp_poll);
                         if elapsed > PAUSE_THRESHOLD && elapsed < DELETE_THRESHOLD {
                             job.status = "paused".to_string();
-                            println!(
-                                "[Scheduler] job_id={} => paused after {}s (cleanup)",
-                                job_id, elapsed
-                            );
+                            println!("[Scheduler] job_id={} => paused after {}s", job_id, elapsed);
                             remove_from_queue(&mut queue, job_id);
                             continue;
                         } else if elapsed >= DELETE_THRESHOLD {
@@ -870,7 +819,6 @@ async fn cleanup_inactive_jobs(
                                 job_id
                             );
                             remove_from_queue(&mut queue, job_id);
-
                             job.result.clear();
                             job.partial_result.clear();
                             job.percent_complete = 0.0;
@@ -889,7 +837,6 @@ async fn cleanup_inactive_jobs(
                                 job_id
                             );
                             remove_from_queue(&mut queue, job_id);
-
                             job.result.clear();
                             job.partial_result.clear();
                             job.percent_complete = 0.0;
@@ -897,7 +844,6 @@ async fn cleanup_inactive_jobs(
                             job.points_total = 0;
                         }
                     }
-                    "finished" | "error" => {}
                     _ => {}
                 }
             }
@@ -928,9 +874,6 @@ fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
     }
 }
 
-////////////////////////////////////////////////////
-// partial pi sampling => every 500ms
-////////////////////////////////////////////////////
 async fn sampling_task(jobs: Arc<Mutex<HashMap<String, JobInfo>>>) {
     loop {
         {
@@ -964,41 +907,4 @@ fn remove_from_queue(queue: &mut Vec<String>, job_id: &str) {
     if let Some(pos) = queue.iter().position(|x| x == job_id) {
         queue.remove(pos);
     }
-}
-
-fn load_certs(path: &str) -> Result<Vec<Certificate>> {
-    println!("[Scheduler] Loading certs from: {}", path);
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut certs = Vec::new();
-    while let Some(item) = rustls_pemfile::read_one(&mut reader)? {
-        if let rustls_pemfile::Item::X509Certificate(b) = item {
-            certs.push(Certificate(b))
-        }
-    }
-    Ok(certs)
-}
-
-fn load_private_key(path: &str) -> Result<PrivateKey> {
-    println!("[Scheduler] Loading private key from: {}", path);
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    while let Some(item) = rustls_pemfile::read_one(&mut reader)? {
-        match item {
-            rustls_pemfile::Item::PKCS8Key(b) => return Ok(PrivateKey(b)),
-            rustls_pemfile::Item::RSAKey(b) => return Ok(PrivateKey(b)),
-            _ => {}
-        }
-    }
-    Err(anyhow::anyhow!("No private key found"))
-}
-
-fn build_tls_config(certs: Vec<Certificate>, key: PrivateKey) -> Result<rustls::ServerConfig> {
-    use rustls::ServerConfig;
-    println!("[Scheduler] Building TLS config");
-    let cfg = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    Ok(cfg)
 }

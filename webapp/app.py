@@ -21,8 +21,14 @@ from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
-SCHEDULER_URL = "https://127.0.0.1:8443"
-SCHEDULER_CERT = os.path.join("certs", "scheduler_cert.pem")
+# 1) Check environment to decide how to contact the Scheduler.
+#    - If HYDRA_ENV=production, we assume there's a real domain with a valid TLS cert (via ALB).
+#    - Otherwise (dev/local), default to "http://127.0.0.1:8443" with no SSL verify.
+IS_PRODUCTION = os.getenv("HYDRA_ENV", "").lower() == "production"
+SCHEDULER_URL = os.getenv("SCHEDULER_URL", "http://127.0.0.1:8443")
+
+# 2) In production, we rely on system CA store. In dev, we skip verifying (in case of self-signed).
+VERIFY_HTTPS = True if IS_PRODUCTION else False
 
 # We store local status of each job to avoid spamming the scheduler unnecessarily
 job_data = {}
@@ -33,9 +39,6 @@ job_data = {}
 #################################################
 @app.route("/")
 def home():
-    """
-    Simple landing page with links to /pi and /mandelbrot
-    """
     return render_template("index.html")
 
 
@@ -44,9 +47,6 @@ def home():
 #################################################
 @app.route("/pi")
 def pi_page():
-    """
-    Page for Pi calculation (moved from the old index.html).
-    """
     return render_template("pi.html")
 
 
@@ -55,9 +55,6 @@ def pi_page():
 #################################################
 @app.route("/mandelbrot")
 def mandelbrot_page():
-    """
-    Page for Mandelbrot calculation.
-    """
     return render_template("mandelbrot.html")
 
 
@@ -66,10 +63,6 @@ def mandelbrot_page():
 #################################################
 @app.route("/mark_old_job", methods=["POST"])
 def mark_old_job():
-    """
-    Kills exactly one old job. The front-end calls this if its `currentJobId` is in progress.
-    So we forcibly mark it as error on the Scheduler side.
-    """
     data = request.get_json()
     if not data or "old_job_id" not in data:
         return jsonify({"error": "No 'old_job_id' provided"}), 400
@@ -77,12 +70,11 @@ def mark_old_job():
     old_job_id = data["old_job_id"]
     try:
         mark_url = f"{SCHEDULER_URL}/api/mark_job_error/{old_job_id}"
-        resp = requests.post(mark_url, verify=SCHEDULER_CERT)
+        resp = requests.post(mark_url, verify=VERIFY_HTTPS)
         print(f"[WebApp] Mark job={old_job_id} => status_code={resp.status_code}")
     except Exception as e:
         print(f"[WebApp] Error marking job={old_job_id} as error: {e}")
 
-    # Locally mark it as error
     if old_job_id in job_data:
         job_data[old_job_id]["status"] = "error"
 
@@ -94,13 +86,6 @@ def mark_old_job():
 #################################################
 @app.route("/start_job", methods=["POST"])
 def start_job():
-    """
-    Creates a brand-new job on the scheduler.
-    The front-end calls /mark_old_job first if needed.
-    We expect JSON like:
-        { "task_type": "calculate_pi", "points": ... } OR
-        { "task_type": "calculate_mandelbrot", "resolution": ... }
-    """
     data = request.get_json()
     if not data or "task_type" not in data:
         return jsonify({"error": "Missing 'task_type'"}), 400
@@ -127,18 +112,15 @@ def start_job():
     elif task_type == "calculate_mandelbrot":
         if "resolution" not in data:
             return jsonify({"error": "Missing 'resolution' for Mandelbrot"}), 400
-        # We'll store the total pixel count in "points" to reuse the chunk logic
-        # e.g. points = resolution * resolution
         resolution = int(data["resolution"])
         payload["points"] = resolution * resolution
         payload["resolution"] = resolution
-
     else:
         return jsonify({"error": f"Unknown task_type: {task_type}"}), 400
 
     try:
         create_url = f"{SCHEDULER_URL}/api/create_job"
-        resp = requests.post(create_url, json=payload, verify=SCHEDULER_CERT)
+        resp = requests.post(create_url, json=payload, verify=VERIFY_HTTPS)
         print(f"[WebApp] Scheduler create_job => status_code={resp.status_code}")
         resp.raise_for_status()
     except Exception as e:
@@ -153,15 +135,12 @@ def start_job():
 #################################################
 @app.route("/job_status/<job_id>", methods=["GET"])
 def job_status(job_id):
-    """
-    Poll the scheduler for the latest status. Return the combined info.
-    """
     if job_id not in job_data:
         return jsonify({"error": "Unknown job_id"}), 404
 
     try:
         resp = requests.get(
-            f"{SCHEDULER_URL}/api/job_status/{job_id}", verify=SCHEDULER_CERT
+            f"{SCHEDULER_URL}/api/job_status/{job_id}", verify=VERIFY_HTTPS
         )
         if resp.ok:
             sched_info = resp.json()
@@ -170,7 +149,7 @@ def job_status(job_id):
             job_data[job_id]["partial_result"] = sched_info["partial_result"]
             job_data[job_id]["percent_complete"] = sched_info["percent_complete"]
         else:
-            print(f"[WebApp] Non-OK response from Scheduler for {job_id}: {resp.text}")
+            print(f"[WebApp] Non-OK response from Scheduler: {resp.text}")
     except Exception as e:
         print(f"[WebApp] Exception in job_status for {job_id}: {e}")
 
@@ -182,13 +161,9 @@ def job_status(job_id):
 #################################################
 @app.route("/job_history/<job_id>", methods=["GET"])
 def job_history(job_id):
-    """
-    For Pi: returns the entire sample list
-    For Mandelbrot: returns partial pixel data
-    """
     try:
         url = f"{SCHEDULER_URL}/api/job_history/{job_id}"
-        resp = requests.get(url, verify=SCHEDULER_CERT)
+        resp = requests.get(url, verify=VERIFY_HTTPS)
         if not resp.ok:
             return (
                 jsonify(
@@ -196,7 +171,6 @@ def job_history(job_id):
                 ),
                 resp.status_code,
             )
-
         data = resp.json()
         return jsonify(data), 200
     except Exception as e:

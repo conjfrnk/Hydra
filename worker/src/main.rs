@@ -14,19 +14,17 @@
 //! You should have received a copy of the GNU General Public License
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::{thread, time::Duration};
 use uuid::Uuid;
 
 ////////////////////////////////////////////////
-// Constants & Data
+// Data Structures (unchanged)
 ////////////////////////////////////////////////
-const SCHEDULER_URL: &str = "https://127.0.0.1:8443";
-const SCHEDULER_CERT_PATH: &str = "certs/scheduler_cert.pem";
-
 #[derive(Debug, Serialize, Deserialize)]
 struct AvailableJobResponse {
     job_id: Option<String>,
@@ -75,29 +73,37 @@ struct RegisterWorkerResponse {
 }
 
 ////////////////////////////////////////////////
+// Constants
+////////////////////////////////////////////////
+// Instead of referencing a local .pem, we let the environment decide
+// where the scheduler is. For production, e.g. SCHEDULER_URL=https://scheduler.hydracompute.com
+// For dev, maybe https://127.0.0.1:8443 (with invalid cert acceptance).
+const DEFAULT_SCHEDULER_URL: &str = "https://127.0.0.1:8443";
+
+////////////////////////////////////////////////
 // main
 ////////////////////////////////////////////////
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Generate a unique worker ID
-    let worker_id = format!("worker-{}", Uuid::new_v4());
+    // Determine environment
+    let env_mode = env::var("HYDRA_ENV").unwrap_or_else(|_| "development".to_string());
+    let scheduler_url =
+        env::var("SCHEDULER_URL").unwrap_or_else(|_| DEFAULT_SCHEDULER_URL.to_string());
 
-    // Build an HTTPS client in a loop
-    let client = loop {
-        match build_https_client().await {
-            Ok(c) => break c,
-            Err(e) => {
-                eprintln!("[Worker] build_https_client error: {:?}", e);
-                eprintln!("[Worker] Retrying in 2 seconds...");
-                thread::sleep(Duration::from_secs(2));
-                continue;
-            }
-        }
-    };
+    println!(
+        "[Worker] HYDRA_ENV={}, connecting to {}",
+        env_mode, scheduler_url
+    );
+
+    // Build HTTP client
+    let client = build_https_client(&env_mode).await?;
+
+    // Create a unique worker ID
+    let worker_id = format!("worker-{}", Uuid::new_v4());
 
     // Register the Worker in a loop
     loop {
-        match register_worker(&client, &worker_id).await {
+        match register_worker(&client, &worker_id, &scheduler_url).await {
             Ok(_) => break,
             Err(e) => {
                 eprintln!("[Worker] register_worker error: {:?}", e);
@@ -109,16 +115,17 @@ async fn main() -> Result<()> {
 
     // Infinity loop: pick an available job, do a chunk, submit. Repeat.
     loop {
-        match find_available_job(&client).await {
+        match find_available_job(&client, &scheduler_url).await {
             Ok(Some(job_id)) => {
-                let chunk_data = match assign_chunk(&client, &job_id, &worker_id).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("[Worker] assign_chunk error: {:?}", e);
-                        thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                };
+                let chunk_data =
+                    match assign_chunk(&client, &job_id, &worker_id, &scheduler_url).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("[Worker] assign_chunk error: {:?}", e);
+                            thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                    };
 
                 if chunk_data.chunk_index.is_none() {
                     // job finished/error/paused => no chunk
@@ -129,8 +136,7 @@ async fn main() -> Result<()> {
 
                 let cindex = chunk_data.chunk_index.unwrap();
                 let cpoints = chunk_data.chunk_size;
-                // Changed line below:
-                println!("[Worker] job_id={} => chunk {} done", job_id, cindex);
+                println!("[Worker] job_id={} => working on chunk {}", job_id, cindex);
 
                 if chunk_data.task_type == "calculate_pi" {
                     let points_in_circle = do_monte_carlo(cpoints);
@@ -142,11 +148,8 @@ async fn main() -> Result<()> {
                         chunk_points: cpoints,
                         mandelbrot_colors: None,
                     };
-                    match submit_chunk(&client, &sc_req).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("[Worker] submit_chunk error: {:?}", e);
-                        }
+                    if let Err(e) = submit_chunk(&client, &sc_req, &scheduler_url).await {
+                        eprintln!("[Worker] submit_chunk error: {:?}", e);
                     }
                 } else if chunk_data.task_type == "calculate_mandelbrot" {
                     let row_index = cindex as u32;
@@ -161,11 +164,8 @@ async fn main() -> Result<()> {
                         chunk_points: cpoints,
                         mandelbrot_colors: Some(row_colors),
                     };
-                    match submit_chunk(&client, &sc_req).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("[Worker] submit_chunk error: {:?}", e);
-                        }
+                    if let Err(e) = submit_chunk(&client, &sc_req, &scheduler_url).await {
+                        eprintln!("[Worker] submit_chunk error: {:?}", e);
                     }
                 } else {
                     println!("[Worker] Unknown task_type={}", chunk_data.task_type);
@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
                 thread::sleep(Duration::from_millis(200));
             }
             Ok(None) => {
-                // No job => sleep
+                // No job => sleep a bit
                 println!("[Worker] No in-progress jobs => sleeping...");
                 thread::sleep(Duration::from_secs(2));
             }
@@ -189,20 +189,23 @@ async fn main() -> Result<()> {
 ////////////////////////////////////////////////
 // Helper Functions
 ////////////////////////////////////////////////
-async fn build_https_client() -> Result<Client> {
-    let ca = std::fs::read(SCHEDULER_CERT_PATH)
-        .map_err(|e| anyhow!("Error reading certificate file: {:?}", e))?;
-    let cert = reqwest::Certificate::from_pem(&ca)
-        .map_err(|e| anyhow!("Error parsing certificate: {:?}", e))?;
-    let client = Client::builder()
-        .use_rustls_tls()
-        .add_root_certificate(cert)
-        .build()?;
+async fn build_https_client(env_mode: &str) -> Result<Client> {
+    // If in production, trust system CA store and do normal TLS verification.
+    // If in dev, we can skip verification in case it's a self-signed or local server.
+    let mut builder = Client::builder().use_rustls_tls();
+
+    if env_mode.to_lowercase() != "production" {
+        // local dev => allow invalid certs
+        builder = builder.danger_accept_invalid_certs(true);
+        println!("[Worker] DEV mode: accepting invalid TLS certs");
+    }
+
+    let client = builder.build()?;
     Ok(client)
 }
 
-async fn register_worker(client: &Client, worker_id: &str) -> Result<()> {
-    let url = format!("{}/api/register_worker", SCHEDULER_URL);
+async fn register_worker(client: &Client, worker_id: &str, scheduler_url: &str) -> Result<()> {
+    let url = format!("{}/api/register_worker", scheduler_url);
     let req_body = RegisterWorkerRequest {
         worker_id: worker_id.to_string(),
     };
@@ -222,8 +225,8 @@ async fn register_worker(client: &Client, worker_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn find_available_job(client: &Client) -> Result<Option<String>> {
-    let url = format!("{}/api/available_job", SCHEDULER_URL);
+async fn find_available_job(client: &Client, scheduler_url: &str) -> Result<Option<String>> {
+    let url = format!("{}/api/available_job", scheduler_url);
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
         bail!(
@@ -240,10 +243,11 @@ async fn assign_chunk(
     client: &Client,
     job_id: &str,
     worker_id: &str,
+    scheduler_url: &str,
 ) -> Result<AssignChunkResponse> {
     let url = format!(
         "{}/api/assign_chunk/{}?worker_id={}",
-        SCHEDULER_URL, job_id, worker_id
+        scheduler_url, job_id, worker_id
     );
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
@@ -257,8 +261,12 @@ async fn assign_chunk(
     Ok(chunk_resp)
 }
 
-async fn submit_chunk(client: &Client, sc_req: &SubmitChunkRequest) -> Result<()> {
-    let url = format!("{}/api/submit_chunk", SCHEDULER_URL);
+async fn submit_chunk(
+    client: &Client,
+    sc_req: &SubmitChunkRequest,
+    scheduler_url: &str,
+) -> Result<()> {
+    let url = format!("{}/api/submit_chunk", scheduler_url);
     let resp = client.post(&url).json(&sc_req).send().await?;
     if !resp.status().is_success() {
         bail!(
@@ -289,17 +297,17 @@ fn do_monte_carlo(n: u64) -> u64 {
 }
 
 fn compute_mandel_row(row_index: u32, resolution: u32) -> Vec<MandelPixel> {
-    let width = resolution as f64;
-    let height = resolution as f64;
-
     let mut row_data = Vec::with_capacity(resolution as usize);
 
     for col_index in 0..resolution {
-        let x0 = -2.0 + 3.0 * (col_index as f64 / (width - 1.0));
-        let y0 = -1.5 + 3.0 * (row_index as f64 / (height - 1.0));
+        let x_frac = col_index as f64 / (resolution as f64 - 1.0);
+        let y_frac = row_index as f64 / (resolution as f64 - 1.0);
+
+        let x0 = -2.0 + 3.0 * x_frac;
+        let y0 = -1.5 + 3.0 * y_frac;
 
         let color = mandel_color(x0, y0);
-        let pixel_index = (row_index as u64) * (resolution as u64) + (col_index as u64);
+        let pixel_index = (row_index as u64) * resolution as u64 + col_index as u64;
 
         row_data.push(MandelPixel {
             index: pixel_index,
@@ -315,14 +323,15 @@ fn mandel_color(cx: f64, cy: f64) -> String {
     let mut y = 0.0;
     let mut iter = 0;
     while x * x + y * y <= 4.0 && iter < max_iter {
-        let xtemp = x * x - y * y + cx;
+        let x_temp = x * x - y * y + cx;
         y = 2.0 * x * y + cy;
-        x = xtemp;
+        x = x_temp;
         iter += 1;
     }
     if iter >= max_iter {
         "#000000".to_string()
     } else {
+        // Simple hue-based coloring
         let hue = (iter as f64 / max_iter as f64) * 360.0;
         hsv_to_rgb_hex(hue, 1.0, 1.0)
     }
@@ -332,25 +341,18 @@ fn hsv_to_rgb_hex(h: f64, s: f64, v: f64) -> String {
     let c = s * v;
     let hh = h / 60.0;
     let x = c * (1.0 - ((hh % 2.0) - 1.0).abs());
-    let (r1, g1, b1) = if hh >= 0.0 && hh < 1.0 {
-        (c, x, 0.0)
-    } else if hh >= 1.0 && hh < 2.0 {
-        (x, c, 0.0)
-    } else if hh >= 2.0 && hh < 3.0 {
-        (0.0, c, x)
-    } else if hh >= 3.0 && hh < 4.0 {
-        (0.0, x, c)
-    } else if hh >= 4.0 && hh < 5.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
+    let (r1, g1, b1) = match hh {
+        h if h >= 0.0 && h < 1.0 => (c, x, 0.0),
+        h if h >= 1.0 && h < 2.0 => (x, c, 0.0),
+        h if h >= 2.0 && h < 3.0 => (0.0, c, x),
+        h if h >= 3.0 && h < 4.0 => (0.0, x, c),
+        h if h >= 4.0 && h < 5.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
     };
     let m = v - c;
-    let (r, g, b) = (r1 + m, g1 + m, b1 + m);
+    let r = (r1 + m) * 255.0;
+    let g = (g1 + m) * 255.0;
+    let b = (b1 + m) * 255.0;
 
-    let ri = (r * 255.0).round() as u8;
-    let gi = (g * 255.0).round() as u8;
-    let bi = (b * 255.0).round() as u8;
-
-    format!("#{:02X}{:02X}{:02X}", ri, gi, bi)
+    format!("#{:02X}{:02X}{:02X}", r as u8, g as u8, b as u8)
 }
