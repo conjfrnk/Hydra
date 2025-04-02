@@ -22,6 +22,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use hyper::server::conn::Http;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::{
@@ -31,7 +32,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::net::TcpListener;
-use tower::ServiceExt; // for .serve
 
 /////////////////////////////////////
 // AppState, Data (Unchanged)
@@ -231,18 +231,21 @@ async fn main() -> Result<()> {
     };
 
     println!("[Scheduler] Binding to {}", addr);
-    // Just do plain HTTP here, no TLS
+
+    // Plain HTTP with a manual accept loop
     let listener = TcpListener::bind(addr).await?;
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, remote_addr) = listener.accept().await?;
         let app_clone = app.clone();
-        // spawn a task per connection
+
         tokio::spawn(async move {
-            if let Err(e) = axum::Server::builder(stream)
-                .serve(app_clone.into_make_service())
+            println!("[Scheduler] Accepted connection from {:?}", remote_addr);
+            if let Err(err) = Http::new()
+                .http1_only(true)
+                .serve_connection(stream, app_clone)
                 .await
             {
-                eprintln!("[Scheduler] server error: {:?}", e);
+                eprintln!("[Scheduler] server error: {:?}", err);
             }
         });
     }
@@ -265,7 +268,7 @@ async fn create_job(
 
     let mut chunk_size = base_chunk_size;
     let mut resolution = payload.resolution;
-    let mut mandel_pixels = HashMap::new();
+    let mandel_pixels = HashMap::new();
 
     if payload.task_type == "calculate_mandelbrot" {
         if resolution < 1 {
