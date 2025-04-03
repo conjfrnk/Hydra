@@ -40,7 +40,8 @@
 
   <form id="piForm">
     <label for="points">Number of random points:</label>
-    <input type="number" id="points" name="points" min="1" step="any" value="1000000000">
+    <!-- formerly 1000000000-->
+    <input type="number" id="points" name="points" min="1" step="any" value="100000000">
     <button type="submit">Calculate</button>
   </form>
 
@@ -304,7 +305,7 @@
       progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
 
       // Start Worker polling every 500ms for a good balance of freshness and load
-      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
+      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 1000 });
     });
   </script>
 

@@ -38,8 +38,8 @@
 
   <form id="mandelbrotForm">
     <label for="resolution">Resolution (square):</label>
-    <!-- default to 1028 -->
-    <input type="number" id="resolution" name="resolution" min="50" value="1028" />
+    <!-- default to 1024 -->
+    <input type="number" id="resolution" name="resolution" min="50" value="1024" />
     <button type="submit">Calculate</button>
   </form>
 
@@ -194,7 +194,7 @@
       startTime = Date.now();
 
       // Start the heartbeat polling every 500ms for a better balance
-      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
+      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 2000 });
     }
   </script>
 
