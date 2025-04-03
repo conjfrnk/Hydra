@@ -1,5 +1,7 @@
 # Hydra
 
+***IMPORTANT!!!!*** This file needs to be updated to reflect recent changes. Information below is partially inaccurate.
+
 ## Distributed Pi Calculation
 
 This part of the project demonstrates a **distributed approach to calculating $\pi$ (pi)** using **dynamic chunking**. It involves three main components:
