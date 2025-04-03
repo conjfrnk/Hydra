@@ -1,6 +1,6 @@
 # Hydra
 
-***IMPORTANT!!!!*** This file needs to be updated to reflect recent changes. Information below is partially inaccurate.
+***IMPORTANT!!!!*** This file needs to be updated to reflect recent changes. Information below, in the "how to run this" secions, is partially inaccurate.
 
 ## Distributed Pi Calculation
 
@@ -9,6 +9,28 @@ This part of the project demonstrates a **distributed approach to calculating $\
 1. **Scheduler (Rust)** – Coordinates jobs, assigns work chunks, and tracks completion.  
 2. **Worker (Rust)** – Performs Monte Carlo simulations for a given chunk of points.  
 3. **WebApp (Python Flask)** – Provides a front-end for users to create Pi calculation jobs and view progress/results in real time.
+
+## Distributed Mandelbrot Generation
+
+In addition to calculating pi, Hydra can also generate the Mandelbrot set using the same distributed approach. Here’s how it works:
+
+- **Image Partitioning:**  
+  The Mandelbrot image is divided into horizontal rows. Each row is treated as a single work chunk. This ensures that every row of the final image is computed and no rows are skipped.
+
+- **Mapping Pixels to the Complex Plane:**  
+  For each pixel in a row, the Worker maps its column and row coordinates to a corresponding complex number $\( c \)$. Typically, the real part is scaled from $\(-2.0\)$ to $\(1.0\)$ and the imaginary part from $\(-1.5\)$ to $\(1.5\)$.
+
+- **Iterative Computation:**  
+  Each Worker runs an iterative algorithm for each pixel using the formula:  
+  $z_{n+1} = z_n^2 + c$
+  starting from $\( z_0 = 0 \)$. The iteration continues until either the magnitude of $\( z \)$ exceeds 2 (indicating divergence) or a preset maximum number of iterations (e.g., 300) is reached.
+
+- **Coloring Based on Iterations:**  
+  - **Inside the Set:** If the point does not diverge within the maximum iterations, it is considered to be in the Mandelbrot set and is colored black.
+  - **Outside the Set:** If the point diverges, a color is calculated (using a hue-based method) based on the number of iterations it took to diverge. This produces the characteristic gradient seen in Mandelbrot images.
+
+- **Aggregation and Rendering:**  
+  Once a Worker computes a row of pixels, it sends the pixel data (including pixel indices and corresponding colors) back to the Scheduler. The Scheduler aggregates all rows, and the WebApp periodically fetches these updates to redraw the complete image on an HTML canvas.
 
 ---
 
