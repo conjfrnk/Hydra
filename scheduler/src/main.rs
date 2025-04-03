@@ -742,20 +742,13 @@ async fn get_job_history(
 
 async fn cleanup_inactive_jobs(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
-    run_queue: Arc<Mutex<Vec<String>>>,
+    _run_queue: Arc<Mutex<Vec<String>>>,
 ) {
-    // Extended thresholds to effectively disable pausing/cancellation due to UI inactivity.
-    const PAUSE_THRESHOLD: u64 = 10000;
-    const DELETE_THRESHOLD: u64 = 100000;
-
     loop {
         {
             let mut map = jobs.lock().unwrap();
-            let mut queue = run_queue.lock().unwrap();
             let now = current_timestamp();
-
             for (job_id, job) in map.iter_mut() {
-                // Removed automatic pausing/cancellation based on webapp poll
                 if job.status == "in-progress" {
                     chunk_reassign(job, job_id, now);
                 }
@@ -766,24 +759,38 @@ async fn cleanup_inactive_jobs(
 }
 
 fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
-    // Extended chunk timeout multiplier from 20 to 40 for slower workers.
-    let time_limit = 40.0 * job.average_chunk_time;
+    let time_limit = if job.task_type == "calculate_mandelbrot" {
+        // For Mandelbrot, rows should be fast; use a fixed short timeout (e.g. 5 seconds)
+        5.0
+    } else {
+        // For Pi jobs, use a multiplier of 40 times the average chunk time.
+        40.0 * job.average_chunk_time
+    };
     let mut reassign_list = vec![];
     for (&cidx, assignment) in job.chunks_in_progress.iter() {
         let elapsed_sec = now.saturating_sub(assignment.assigned_at) as f64;
         if elapsed_sec > time_limit {
             println!(
-                "[Scheduler] job_id={} => chunk={} overdue ({}s > 40×{}s). kill & reassign",
-                job_id, cidx, elapsed_sec, job.average_chunk_time
+                "[Scheduler] job_id={} => chunk={} overdue ({}s > {}s). Reassigning.",
+                job_id, cidx, elapsed_sec, time_limit
             );
             reassign_list.push(cidx);
         }
     }
     for cidx in reassign_list {
         job.chunks_in_progress.remove(&cidx);
-        job.killed_chunks.insert(cidx);
-        if cidx < job.next_chunk {
-            job.next_chunk = cidx;
+        if job.task_type == "calculate_mandelbrot" {
+            // For Mandelbrot, do not mark as killed; reassign this row by
+            // setting next_chunk to the lower index if needed.
+            if cidx < job.next_chunk {
+                job.next_chunk = cidx;
+            }
+        } else {
+            // For other tasks, mark the chunk as killed and reassign.
+            job.killed_chunks.insert(cidx);
+            if cidx < job.next_chunk {
+                job.next_chunk = cidx;
+            }
         }
     }
 }
@@ -799,7 +806,6 @@ async fn sampling_task(jobs: Arc<Mutex<HashMap<String, JobInfo>>>) {
                 {
                     let pi_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
                     let pct = job.percent_complete;
-                    // Only add sample if we've reached a new whole percentage
                     if job.samples.is_empty()
                         || (pct as u32) > (job.samples.last().unwrap().percent as u32)
                     {

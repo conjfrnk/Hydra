@@ -141,13 +141,12 @@ def job_status(job_id):
         )
         if resp.ok:
             sched_info = resp.json()
-            job_data[job_id] = sched_info  # Update (or create) our local record with the latest status.
+            job_data[job_id] = sched_info  # update our local record with the latest data
         else:
             print(f"[WebApp] Non-OK response from Scheduler: {resp.text}")
     except Exception as e:
         print(f"[WebApp] Exception in job_status for {job_id}: {e}")
 
-    # Always return the stored job status if available.
     return jsonify(job_data.get(job_id, {"error": "Job not found"}))
 
 

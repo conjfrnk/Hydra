@@ -71,55 +71,12 @@
     const canvas = document.getElementById('mandelCanvas');
     const ctx = canvas.getContext('2d');
 
-    pollWorker.onmessage = function(e) {
-      let msg = e.data;
-      if (msg.type === "STATUS") {
-        if (msg.jobId !== currentJobId) return;
-        let sData = msg.data;
-
-        if (sData.status === "finished") {
-          let endTime = Date.now();
-          let elapsedSec = (endTime - startTime)/1000;
-          let hms = formatHMS(elapsedSec);
-          progressDiv.textContent = `Done! Took ${hms} total.`;
-          pollWorker.postMessage({ type: "STOP" });
-          currentJobId = "";
-        } else if (sData.status === "in-progress") {
-          let pct = parseFloat(sData.percent_complete);
-          let elapsedSec = (Date.now() - startTime)/1000;
-          let fraction = pct / 100;
-          let timeLeftStr = "";
-          if (fraction > 0.01) {
-            let totalSecEst = elapsedSec / fraction;
-            let remainSec = totalSecEst - elapsedSec;
-            timeLeftStr = ` ~${formatHMS(remainSec)} left`;
-          }
-          progressDiv.textContent = `In progress... ${pct.toFixed(2)}% done${timeLeftStr}`;
-        } else if (sData.status === "error") {
-          progressDiv.textContent = "Job encountered an error or was canceled.";
-          pollWorker.postMessage({ type: "STOP" });
-          currentJobId = "";
-        } else if (sData.status === "paused") {
-          progressDiv.textContent = "Job is paused (no webapp poll).";
-        } else {
-          progressDiv.textContent = `Status: ${sData.status}`;
-        }
-
-        // fetch partial image data
-        updateImagePixels(currentJobId);
-
-      } else if (msg.type === "ERROR") {
-        console.warn("[Worker] Poll error =>", msg.info);
-      }
-    };
-
     async function updateImagePixels(jobId) {
       if (!jobId) return;
       try {
         let resp = await fetch(`/job_history/${jobId}`);
         if (!resp.ok) {
-          console.warn("updateImagePixels: non-OK history fetch");
-          return;
+          throw new Error(`History fetch error: ${resp.status}`);
         }
         let data = await resp.json();
         if (!data.pixels) return;
@@ -147,6 +104,48 @@
         console.warn("updateImagePixels exception =>", e);
       }
     }
+
+    pollWorker.onmessage = function(e) {
+      let msg = e.data;
+      if (msg.type === "STATUS") {
+        if (msg.jobId !== currentJobId) return;
+        let sData = msg.data;
+
+        if (sData.status === "finished") {
+          let endTime = Date.now();
+          let elapsedSec = (endTime - startTime)/1000;
+          let hms = formatHMS(elapsedSec);
+          progressDiv.textContent = `Done! Took ${hms} total.`;
+          // Force a final update of the image pixels
+          updateImagePixels(currentJobId);
+          pollWorker.postMessage({ type: "STOP" });
+          currentJobId = "";
+        } else if (sData.status === "in-progress") {
+          let pct = parseFloat(sData.percent_complete);
+          let elapsedSec = (Date.now() - startTime)/1000;
+          let fraction = pct / 100;
+          let timeLeftStr = "";
+          if (fraction > 0.01) {
+            let totalSecEst = elapsedSec / fraction;
+            let remainSec = totalSecEst - elapsedSec;
+            timeLeftStr = ` ~${formatHMS(remainSec)} left`;
+          }
+          progressDiv.textContent = `In progress... ${pct.toFixed(2)}% done${timeLeftStr}`;
+          // Update the image immediately after status update.
+          updateImagePixels(currentJobId);
+        } else if (sData.status === "error") {
+          progressDiv.textContent = "Job encountered an error or was canceled.";
+          pollWorker.postMessage({ type: "STOP" });
+          currentJobId = "";
+        } else {
+          progressDiv.textContent = `Status: ${sData.status}`;
+          pollWorker.postMessage({ type: "STOP" });
+          currentJobId = "";
+        }
+      } else if (msg.type === "ERROR") {
+        console.warn("[Worker] Poll error =>", msg.info);
+      }
+    };
 
     document.getElementById('mandelbrotForm').addEventListener('submit', async evt => {
       evt.preventDefault();
@@ -194,8 +193,8 @@
       currentJobId = createData.job_id;
       startTime = Date.now();
 
-      // Start the heartbeat polling every 200ms for faster refresh
-      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 200 });
+      // Start the heartbeat polling every 500ms for a better balance
+      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
     }
   </script>
 
