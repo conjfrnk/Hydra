@@ -135,25 +135,20 @@ def start_job():
 #################################################
 @app.route("/job_status/<job_id>", methods=["GET"])
 def job_status(job_id):
-    if job_id not in job_data:
-        return jsonify({"error": "Unknown job_id"}), 404
-
     try:
         resp = requests.get(
             f"{SCHEDULER_URL}/api/job_status/{job_id}", verify=VERIFY_HTTPS
         )
         if resp.ok:
             sched_info = resp.json()
-            job_data[job_id]["status"] = sched_info["status"]
-            job_data[job_id]["result"] = sched_info["result"]
-            job_data[job_id]["partial_result"] = sched_info["partial_result"]
-            job_data[job_id]["percent_complete"] = sched_info["percent_complete"]
+            job_data[job_id] = sched_info  # Update (or create) our local record with the latest status.
         else:
             print(f"[WebApp] Non-OK response from Scheduler: {resp.text}")
     except Exception as e:
         print(f"[WebApp] Exception in job_status for {job_id}: {e}")
 
-    return jsonify(job_data[job_id])
+    # Always return the stored job status if available.
+    return jsonify(job_data.get(job_id, {"error": "Job not found"}))
 
 
 #################################################

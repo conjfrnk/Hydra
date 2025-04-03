@@ -291,8 +291,8 @@
 
       progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
 
-      // Start Worker polling 2x/sec
-      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
+      // Start Worker polling every 200ms for faster refresh
+      pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 200 });
     });
   </script>
 
