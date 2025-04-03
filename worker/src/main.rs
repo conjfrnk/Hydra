@@ -18,8 +18,7 @@ use anyhow::{Result, bail};
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::{thread, time::Duration};
+use std::{env, thread, time::Duration};
 use uuid::Uuid;
 
 ////////////////////////////////////////////////
@@ -75,28 +74,32 @@ struct RegisterWorkerResponse {
 ////////////////////////////////////////////////
 // Constants
 ////////////////////////////////////////////////
-// Instead of referencing a local .pem, we let the environment decide
-// where the scheduler is. For production, e.g. SCHEDULER_URL=https://scheduler.hydracompute.com
-// For dev, maybe https://127.0.0.1:8443 (with invalid cert acceptance).
-const DEFAULT_SCHEDULER_URL: &str = "https://127.0.0.1:8443";
+
+/// The default production Scheduler URL.
+const PROD_SCHEDULER_URL: &str = "https://scheduler.hydracompute.com";
+
+/// An optional local URL for development if `--local` is specified.
+const LOCAL_SCHEDULER_URL: &str = "https://127.0.0.1:8443";
 
 ////////////////////////////////////////////////
 // main
 ////////////////////////////////////////////////
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Determine environment
-    let env_mode = env::var("HYDRA_ENV").unwrap_or_else(|_| "development".to_string());
-    let scheduler_url =
-        env::var("SCHEDULER_URL").unwrap_or_else(|_| DEFAULT_SCHEDULER_URL.to_string());
+    // Parse command-line args to see if user specified --local
+    let args: Vec<String> = env::args().collect();
+    // Default to production scheduler
+    let mut scheduler_url = PROD_SCHEDULER_URL.to_string();
 
-    println!(
-        "[Worker] HYDRA_ENV={}, connecting to {}",
-        env_mode, scheduler_url
-    );
+    if args.contains(&"--local".to_string()) {
+        scheduler_url = LOCAL_SCHEDULER_URL.to_string();
+        println!("[Worker] Running in local mode => {}", scheduler_url);
+    } else {
+        println!("[Worker] Running in production mode => {}", scheduler_url);
+    }
 
-    // Build HTTP client
-    let client = build_https_client(&env_mode).await?;
+    // Build the HTTP/TLS client
+    let client = build_https_client(&scheduler_url).await?;
 
     // Create a unique worker ID
     let worker_id = format!("worker-{}", Uuid::new_v4());
@@ -189,15 +192,16 @@ async fn main() -> Result<()> {
 ////////////////////////////////////////////////
 // Helper Functions
 ////////////////////////////////////////////////
-async fn build_https_client(env_mode: &str) -> Result<Client> {
-    // If in production, trust system CA store and do normal TLS verification.
-    // If in dev, we can skip verification in case it's a self-signed or local server.
-    let mut builder = Client::builder().use_rustls_tls();
 
-    if env_mode.to_lowercase() != "production" {
-        // local dev => allow invalid certs
+/// Build an HTTPS client. If local mode, we might skip cert verification.
+async fn build_https_client(scheduler_url: &str) -> Result<Client> {
+    // We'll check if the user is pointing to localhost or 127.0.0.1. If so, let's allow invalid certs.
+    let is_local = scheduler_url.contains("127.0.0.1");
+
+    let mut builder = Client::builder().use_rustls_tls();
+    if is_local {
+        println!("[Worker] Local dev => accepting invalid TLS certs");
         builder = builder.danger_accept_invalid_certs(true);
-        println!("[Worker] DEV mode: accepting invalid TLS certs");
     }
 
     let client = builder.build()?;
@@ -307,7 +311,7 @@ fn compute_mandel_row(row_index: u32, resolution: u32) -> Vec<MandelPixel> {
         let y0 = -1.5 + 3.0 * y_frac;
 
         let color = mandel_color(x0, y0);
-        let pixel_index = (row_index as u64) * resolution as u64 + col_index as u64;
+        let pixel_index = (row_index as u64) * (resolution as u64) + (col_index as u64);
 
         row_data.push(MandelPixel {
             index: pixel_index,
@@ -322,12 +326,14 @@ fn mandel_color(cx: f64, cy: f64) -> String {
     let mut x = 0.0;
     let mut y = 0.0;
     let mut iter = 0;
+
     while x * x + y * y <= 4.0 && iter < max_iter {
         let x_temp = x * x - y * y + cx;
         y = 2.0 * x * y + cy;
         x = x_temp;
         iter += 1;
     }
+
     if iter >= max_iter {
         "#000000".to_string()
     } else {
