@@ -95,7 +95,6 @@
             timeLeftStr = ` ~${formatHMS(remainSec)} left`;
           }
           progressDiv.textContent = `In progress... ${pct.toFixed(2)}% done${timeLeftStr}`;
-
         } else if (sData.status === "error") {
           progressDiv.textContent = "Job encountered an error or was canceled.";
           pollWorker.postMessage({ type: "STOP" });
@@ -199,5 +198,9 @@
       pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
     }
   </script>
+
+  <footer style="text-align: center; margin-top: 20px;">
+    <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
+  </footer>
 </body>
 </html>

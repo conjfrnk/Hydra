@@ -184,9 +184,13 @@
         } else if (sData.status === "in-progress") {
           let partialVal = parseFloat(sData.partial_result);
           let pct = parseFloat(sData.percent_complete);
-          chart.data.datasets[0].data.push({ x: pct, y: partialVal });
-          currentPercent = pct;
-          chart.update();
+          // Only add a new data point when a new whole percent is reached
+          let data = chart.data.datasets[0].data;
+          if (data.length === 0 || Math.floor(pct) > Math.floor(data[data.length - 1].x)) {
+            chart.data.datasets[0].data.push({ x: pct, y: partialVal });
+            currentPercent = pct;
+            chart.update();
+          }
 
           let elapsedSec = (Date.now() - startTime)/1000;
           let fraction = pct / 100;
@@ -291,5 +295,9 @@
       pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 500 });
     });
   </script>
+
+  <footer style="text-align: center; margin-top: 20px;">
+    <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
+  </footer>
 </body>
 </html>

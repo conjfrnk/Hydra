@@ -287,7 +287,7 @@ async fn create_job(
         partial_result: "".to_string(),
         percent_complete: 0.0,
 
-        points: payload.points,
+        points: payload.points, // For Mandelbrot, webapp already sends resolution*resolution
         chunk_size,
         completed_chunks: 0,
         total_chunks,
@@ -327,15 +327,7 @@ async fn get_job_status(
     if let Some(job) = jobs.get_mut(&job_id) {
         job.last_webapp_poll = current_timestamp();
 
-        if job.status == "paused" {
-            job.status = "in-progress".to_string();
-            println!("[Scheduler] job_id={} => resumed via webapp poll", job_id);
-
-            let mut queue = state.run_queue.lock().unwrap();
-            if !queue.contains(&job_id) {
-                queue.push(job_id.clone());
-            }
-        }
+        // Removed auto-resume/pausing logic based on webapp poll
 
         let resp = JobStatusResponse {
             status: job.status.clone(),
@@ -572,53 +564,7 @@ async fn assign_chunk(
     let worker_id = query.worker_id.clone();
 
     if let Some(job) = jobs.get_mut(&job_id) {
-        let elapsed = now.saturating_sub(job.last_webapp_poll);
-        if job.status == "in-progress" && elapsed > 10 {
-            job.status = "paused".to_string();
-            println!(
-                "[Scheduler] job_id={} => immediate pause after {}s no webapp poll",
-                job_id, elapsed
-            );
-            remove_from_queue(&mut queue, &job_id);
-            return Ok(Json(AssignChunkResponse {
-                chunk_index: None,
-                chunk_size: 0,
-                job_status: "paused".to_string(),
-                resolution: job.resolution,
-                task_type: job.task_type.clone(),
-            }));
-        }
-
-        match job.status.as_str() {
-            "finished" => {
-                return Ok(Json(AssignChunkResponse {
-                    chunk_index: None,
-                    chunk_size: 0,
-                    job_status: "finished".to_string(),
-                    resolution: job.resolution,
-                    task_type: job.task_type.clone(),
-                }));
-            }
-            "error" => {
-                return Ok(Json(AssignChunkResponse {
-                    chunk_index: None,
-                    chunk_size: 0,
-                    job_status: "error".to_string(),
-                    resolution: job.resolution,
-                    task_type: job.task_type.clone(),
-                }));
-            }
-            "paused" => {
-                return Ok(Json(AssignChunkResponse {
-                    chunk_index: None,
-                    chunk_size: 0,
-                    job_status: "paused".to_string(),
-                    resolution: job.resolution,
-                    task_type: job.task_type.clone(),
-                }));
-            }
-            _ => {}
-        }
+        // Removed heartbeat check so job is not paused based on webapp poll
 
         if job.points_total >= job.points {
             job.status = "finished".to_string();
@@ -798,8 +744,9 @@ async fn cleanup_inactive_jobs(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     run_queue: Arc<Mutex<Vec<String>>>,
 ) {
-    const PAUSE_THRESHOLD: u64 = 20;
-    const DELETE_THRESHOLD: u64 = 600;
+    // Extended thresholds to effectively disable pausing/cancellation due to UI inactivity.
+    const PAUSE_THRESHOLD: u64 = 10000;
+    const DELETE_THRESHOLD: u64 = 100000;
 
     loop {
         {
@@ -808,47 +755,9 @@ async fn cleanup_inactive_jobs(
             let now = current_timestamp();
 
             for (job_id, job) in map.iter_mut() {
-                match job.status.as_str() {
-                    "in-progress" => {
-                        let elapsed = now.saturating_sub(job.last_webapp_poll);
-                        if elapsed > PAUSE_THRESHOLD && elapsed < DELETE_THRESHOLD {
-                            job.status = "paused".to_string();
-                            println!("[Scheduler] job_id={} => paused after {}s", job_id, elapsed);
-                            remove_from_queue(&mut queue, job_id);
-                            continue;
-                        } else if elapsed >= DELETE_THRESHOLD {
-                            job.status = "error".to_string();
-                            println!(
-                                "[Scheduler] job_id={} => canceled after 300s no webapp poll",
-                                job_id
-                            );
-                            remove_from_queue(&mut queue, job_id);
-                            job.result.clear();
-                            job.partial_result.clear();
-                            job.percent_complete = 0.0;
-                            job.points_in_circle = 0;
-                            job.points_total = 0;
-                            continue;
-                        }
-                        chunk_reassign(job, job_id, now);
-                    }
-                    "paused" => {
-                        let elapsed = now.saturating_sub(job.last_webapp_poll);
-                        if elapsed >= DELETE_THRESHOLD {
-                            job.status = "error".to_string();
-                            println!(
-                                "[Scheduler] job_id={} => canceled after 300s paused",
-                                job_id
-                            );
-                            remove_from_queue(&mut queue, job_id);
-                            job.result.clear();
-                            job.partial_result.clear();
-                            job.percent_complete = 0.0;
-                            job.points_in_circle = 0;
-                            job.points_total = 0;
-                        }
-                    }
-                    _ => {}
+                // Removed automatic pausing/cancellation based on webapp poll
+                if job.status == "in-progress" {
+                    chunk_reassign(job, job_id, now);
                 }
             }
         }
@@ -857,13 +766,14 @@ async fn cleanup_inactive_jobs(
 }
 
 fn chunk_reassign(job: &mut JobInfo, job_id: &str, now: u64) {
-    let time_limit = 20.0 * job.average_chunk_time;
+    // Extended chunk timeout multiplier from 20 to 40 for slower workers.
+    let time_limit = 40.0 * job.average_chunk_time;
     let mut reassign_list = vec![];
     for (&cidx, assignment) in job.chunks_in_progress.iter() {
         let elapsed_sec = now.saturating_sub(assignment.assigned_at) as f64;
         if elapsed_sec > time_limit {
             println!(
-                "[Scheduler] job_id={} => chunk={} overdue ({}s > 20×{}s). kill & reassign",
+                "[Scheduler] job_id={} => chunk={} overdue ({}s > 40×{}s). kill & reassign",
                 job_id, cidx, elapsed_sec, job.average_chunk_time
             );
             reassign_list.push(cidx);
@@ -889,10 +799,15 @@ async fn sampling_task(jobs: Arc<Mutex<HashMap<String, JobInfo>>>) {
                 {
                     let pi_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
                     let pct = job.percent_complete;
-                    job.samples.push(SamplePoint {
-                        approx_pi: pi_val,
-                        percent: pct,
-                    });
+                    // Only add sample if we've reached a new whole percentage
+                    if job.samples.is_empty()
+                        || (pct as u32) > (job.samples.last().unwrap().percent as u32)
+                    {
+                        job.samples.push(SamplePoint {
+                            approx_pi: pi_val,
+                            percent: pct,
+                        });
+                    }
                 }
             }
         }
