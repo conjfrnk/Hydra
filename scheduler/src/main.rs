@@ -326,9 +326,6 @@ async fn get_job_status(
     let mut jobs = state.jobs.lock().unwrap();
     if let Some(job) = jobs.get_mut(&job_id) {
         job.last_webapp_poll = current_timestamp();
-
-        // Removed auto-resume/pausing logic based on webapp poll
-
         let resp = JobStatusResponse {
             status: job.status.clone(),
             result: job.result.clone(),
@@ -351,7 +348,6 @@ async fn register_worker(
     Json(payload): Json<RegisterWorkerRequest>,
 ) -> Json<RegisterWorkerResponse> {
     println!("[Scheduler] register_worker: {:?}", payload);
-
     let mut workers = state.workers.lock().unwrap();
     workers
         .entry(payload.worker_id.clone())
@@ -361,9 +357,7 @@ async fn register_worker(
             avg_points_per_sec: 0.0,
             measure_count: 0,
         });
-
     println!("[Scheduler] Worker {} => registered", payload.worker_id);
-
     Json(RegisterWorkerResponse {
         status: "registered".to_string(),
         assigned_worker_id: payload.worker_id,
@@ -375,11 +369,9 @@ async fn submit_chunk(
     Json(payload): Json<SubmitChunkRequest>,
 ) -> Json<SubmitChunkResponse> {
     println!("[Scheduler] submit_chunk: {:?}", payload);
-
     let now = current_timestamp();
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
-
     if let Some(job) = jobs.get_mut(&payload.job_id) {
         match job.status.as_str() {
             "finished" => {
@@ -402,7 +394,6 @@ async fn submit_chunk(
             }
             _ => {}
         }
-
         if job.killed_chunks.contains(&payload.chunk_index) {
             println!(
                 "[Scheduler] ignoring chunk={} for job={} (killed)",
@@ -413,24 +404,20 @@ async fn submit_chunk(
                 updated_worker_total: 0,
             });
         }
-
         let mut elapsed_sec = 0.0;
         if let Some(assignment) = job.chunks_in_progress.remove(&payload.chunk_index) {
             elapsed_sec = now.saturating_sub(assignment.assigned_at) as f64;
             let alpha = 0.3;
             job.average_chunk_time = alpha * elapsed_sec + (1.0 - alpha) * job.average_chunk_time;
         }
-
         if job.task_type == "calculate_pi" {
             let points_in_circle = payload.points_in_circle.unwrap_or(0);
             job.completed_chunks += 1;
             job.points_in_circle += points_in_circle;
             job.points_total += payload.chunk_points;
-
             let partial_pi = 4.0 * (job.points_in_circle as f64 / job.points_total as f64);
             job.partial_result = format!("{:.6}", partial_pi);
             job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
-
             if job.points_total >= job.points {
                 let final_val = job.partial_result.parse::<f64>().unwrap_or(0.0);
                 job.samples.push(SamplePoint {
@@ -455,15 +442,15 @@ async fn submit_chunk(
             job.completed_chunks += 1;
             let row_points = payload.chunk_points;
             job.points_total += row_points;
-
             if let Some(colors) = &payload.mandelbrot_colors {
                 for px in colors {
                     job.mandel_pixels.insert(px.index, px.color.clone());
                 }
             }
-
             job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
-            if job.completed_chunks >= job.total_chunks {
+            // Instead of filling missing rows with black, we check if all pixels have been computed.
+                    let total_pixels = (job.resolution as u64) * (job.resolution as u64);
+            if job.mandel_pixels.len() as u64 == total_pixels {
                 job.status = "finished".to_string();
                 job.result = "Mandelbrot complete".to_string();
                 job.partial_result = "Done".to_string();
@@ -478,13 +465,12 @@ async fn submit_chunk(
                     "[Scheduler] job_id={} => chunk {} done, {}% done",
                     payload.job_id, payload.chunk_index, job.percent_complete
                 );
+                // Note: Missing rows remain unrendered so they can be reassigned via chunk_reassign.
             }
         }
-
         let mut workers_map = state.workers.lock().unwrap();
         let updated_total = if let Some(w) = workers_map.get_mut(&payload.worker_id) {
             w.total_compute += 1;
-
             if elapsed_sec > 0.0 && payload.chunk_points > 0 {
                 let pps = payload.chunk_points as f64 / elapsed_sec;
                 let blend = 0.3;
@@ -494,18 +480,15 @@ async fn submit_chunk(
                     w.avg_points_per_sec = (1.0 - blend) * w.avg_points_per_sec + blend * pps;
                 }
                 w.measure_count += 1;
-
                 println!(
                     "[Scheduler] Worker {} => measured pps={:.2}, new_avg={:.2}",
                     w.worker_id, pps, w.avg_points_per_sec
                 );
             }
-
             w.total_compute
         } else {
             0
         };
-
         Json(SubmitChunkResponse {
             status: "chunk_submitted".to_string(),
             updated_worker_total: updated_total,
@@ -526,7 +509,6 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
     let jobs = state.jobs.lock().unwrap();
     let queue = state.run_queue.lock().unwrap();
     let mut counter = state.round_counter.lock().unwrap();
-
     let in_progress: Vec<String> = queue
         .iter()
         .filter_map(|jid| {
@@ -538,15 +520,12 @@ async fn available_job(State(state): State<AppState>) -> Json<AvailableJobRespon
             }
         })
         .collect();
-
     if in_progress.is_empty() {
         return Json(AvailableJobResponse { job_id: None });
     }
-
     let idx = (*counter as usize) % in_progress.len();
     *counter += 1;
     let chosen = in_progress[idx].clone();
-
     Json(AvailableJobResponse {
         job_id: Some(chosen),
     })
@@ -558,14 +537,11 @@ async fn assign_chunk(
     Query(query): Query<AssignChunkQuery>,
 ) -> Result<Json<AssignChunkResponse>, (StatusCode, &'static str)> {
     let now = current_timestamp();
-
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
     let worker_id = query.worker_id.clone();
-
     if let Some(job) = jobs.get_mut(&job_id) {
         // Removed heartbeat check so job is not paused based on webapp poll
-
         if job.points_total >= job.points {
             job.status = "finished".to_string();
             job.result = job.partial_result.clone();
@@ -579,7 +555,6 @@ async fn assign_chunk(
                 task_type: job.task_type.clone(),
             }));
         }
-
         let cindex = job.next_chunk;
         job.next_chunk += 1;
         job.chunks_in_progress.insert(
@@ -589,13 +564,10 @@ async fn assign_chunk(
                 assigned_at: now,
             },
         );
-
         let points_remaining = job.points.saturating_sub(job.points_total);
         let mut dynamic_chunk = job.chunk_size;
-
         let workers_map = state.workers.lock().unwrap();
         let maybe_stats = workers_map.get(&worker_id);
-
         if job.task_type == "calculate_pi" {
             if let Some(w) = maybe_stats {
                 if w.avg_points_per_sec > 0.0 {
@@ -619,12 +591,10 @@ async fn assign_chunk(
         } else if job.task_type == "calculate_mandelbrot" {
             dynamic_chunk = job.resolution as u64;
         }
-
         println!(
             "[Scheduler] job_id={} => worker_id={} => chunk_index={} => chunk_size={}",
             job_id, worker_id, cindex, dynamic_chunk
         );
-
         Ok(Json(AssignChunkResponse {
             chunk_index: Some(cindex),
             chunk_size: dynamic_chunk,
@@ -643,13 +613,11 @@ async fn mark_job_error(
 ) -> impl IntoResponse {
     let mut jobs = state.jobs.lock().unwrap();
     let mut queue = state.run_queue.lock().unwrap();
-
     match jobs.get_mut(&job_id) {
         Some(job) => {
             job.status = "error".to_string();
             remove_from_queue(&mut queue, &job_id);
             println!("[Scheduler] job_id={} => forcibly error", job_id);
-
             Json(MarkErrorResponse {
                 job_id,
                 status: "error".to_string(),
@@ -682,7 +650,6 @@ async fn mark_job_error(
             };
             jobs.insert(job_id.clone(), new_job);
             remove_from_queue(&mut queue, &job_id);
-
             println!(
                 "[Scheduler] job_id={} not found => created error record",
                 job_id
