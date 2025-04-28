@@ -252,9 +252,6 @@ async fn main() -> Result<()> {
     }
 }
 
-////////////////////////////////////////////////////
-// The rest is the same logic
-////////////////////////////////////////////////////
 async fn create_job(
     State(state): State<AppState>,
     Json(payload): Json<CreateJobRequest>,
@@ -449,7 +446,7 @@ async fn submit_chunk(
             }
             job.percent_complete = (job.points_total as f32 / job.points as f32) * 100.0;
             // Instead of filling missing rows with black, we check if all pixels have been computed.
-                    let total_pixels = (job.resolution as u64) * (job.resolution as u64);
+            let total_pixels = (job.resolution as u64) * (job.resolution as u64);
             if job.mandel_pixels.len() as u64 == total_pixels {
                 job.status = "finished".to_string();
                 job.result = "Mandelbrot complete".to_string();
