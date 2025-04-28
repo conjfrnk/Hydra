@@ -1,149 +1,89 @@
-# Hydra
+# Hydra — a Volunteer-Cloud Proof-of-Concept
 
-***IMPORTANT!!!!*** This file needs to be updated to reflect recent changes. Information below, in the "how to run this" secions, is partially inaccurate.
+Hydra lets idle laptops, desktops, and single-board computers cooperate on embarrassingly-parallel work.  
+The current prototype pairs a **Rust** scheduler + worker binary with a **Python (Flask)** web front-end.
 
-## Distributed Pi Calculation
+> **Project status:** functional PoC  
+> – ✅ Dynamic chunking for Monte-Carlo π  
+> – ✅ Distributed Mandelbrot rendering (static row chunks)  
+> – ✅ Automatic retry / chunk reassignment  
+> – ⚠️ No secure enclaves yet • No token rewards yet • No carbon-aware dispatch yet
 
-This part of the project demonstrates a **distributed approach to calculating $\pi$ (pi)** using **dynamic chunking**. It involves three main components:
-
-1. **Scheduler (Rust)** – Coordinates jobs, assigns work chunks, and tracks completion.  
-2. **Worker (Rust)** – Performs Monte Carlo simulations for a given chunk of points.  
-3. **WebApp (Python Flask)** – Provides a front-end for users to create Pi calculation jobs and view progress/results in real time.
-
-## Distributed Mandelbrot Generation
-
-In addition to calculating pi, Hydra can also generate the Mandelbrot set using the same distributed approach. Here’s how it works:
-
-- **Image Partitioning:**  
-  The Mandelbrot image is divided into horizontal rows. Each row is treated as a single work chunk. This ensures that every row of the final image is computed and no rows are skipped.
-
-- **Mapping Pixels to the Complex Plane:**  
-  For each pixel in a row, the Worker maps its column and row coordinates to a corresponding complex number $\( c \)$. Typically, the real part is scaled from $\(-2.0\)$ to $\(1.0\)$ and the imaginary part from $\(-1.5\)$ to $\(1.5\)$.
-
-- **Iterative Computation:**  
-  Each Worker runs an iterative algorithm for each pixel using the formula:  
-  $z_{n+1} = z_n^2 + c$
-  starting from $\( z_0 = 0 \)$. The iteration continues until either the magnitude of $\( z \)$ exceeds 2 (indicating divergence) or a preset maximum number of iterations (e.g., 300) is reached.
-
-- **Coloring Based on Iterations:**  
-  - **Inside the Set:** If the point does not diverge within the maximum iterations, it is considered to be in the Mandelbrot set and is colored black.
-  - **Outside the Set:** If the point diverges, a color is calculated (using a hue-based method) based on the number of iterations it took to diverge. This produces the characteristic gradient seen in Mandelbrot images.
-
-- **Aggregation and Rendering:**  
-  Once a Worker computes a row of pixels, it sends the pixel data (including pixel indices and corresponding colors) back to the Scheduler. The Scheduler aggregates all rows, and the WebApp periodically fetches these updates to redraw the complete image on an HTML canvas.
+A longer technical write-up (architecture, benchmarks, carbon analysis) is in `written_final_report.pdf`
 
 ---
 
-## Overview
+## Live demo
 
-### General Flow
-
-- The user visits the **WebApp**, inputs a large number of random points (e.g., 1 billion).
-- The WebApp instructs the **Scheduler** to create a new job.
-- **Workers** (which can be on the same machine or multiple machines) query the Scheduler for an available job, receive a chunk of random points to compute, run the Monte Carlo step, and submit partial results back to the Scheduler.
-- The Scheduler aggregates partial results (points inside the circle vs. total points) to estimate $\pi$.
-- The WebApp periodically polls the Scheduler to update the progress and final result in a browser chart.
-
-### Monte Carlo Pi Calculation
-
-- Each Worker randomly generates points $(x, y)$ in the unit square $[0,1) \times [0,1)$.
-- A point lies inside the unit circle if $x^2 + y^2 \leq 1$.
-- The fraction of points inside vs. total points, multiplied by 4, approximates $\pi$. (Because the area of a unit circle is $\pi$, and the square’s area is 1, so the ratio $\pi / 4$ is expected if points are uniformly distributed.)
-
-### Dynamic Chunking
-
-- Instead of splitting the total points in a static way, the Scheduler assigns multiple, smaller “chunks” of points to each Worker.
-- Over time, the Scheduler measures each Worker’s throughput (points computed per second).
-- When a Worker requests more work, the Scheduler sizes the chunk based on **that Worker’s** observed performance, aiming for ~2 seconds of compute.
-- This ensures faster Workers get larger chunks, slower Workers get smaller chunks, maximizing overall throughput and preventing idle time.
+<https://hydracompute.com> – runs the same code in this repo behind an ALB with a public TLS cert.
 
 ---
 
-## Key Components
-
-### Scheduler
-
-- **Language**: Rust
-- **Location**: `scheduler/` directory
-- **Responsibilities**:
-  1. Maintains a list of jobs. Each job tracks number of points, partial result, percentage complete, and status.
-  2. Receives chunk submissions (how many points in the circle vs. total).
-  3. Tracks each Worker’s measured speed (`avg_points_per_sec`) so it can adapt chunk sizes.
-  4. Cleans up inactive or stalled jobs.
-  5. Provides a REST API for the WebApp and Workers.
-
-- **Endpoints** (subset):
-  - `POST /api/create_job`: Creates a new job (given number of points, etc.).
-  - `GET /api/assign_chunk/:job_id?worker_id=...`: Returns a custom chunk for the worker, based on that worker’s performance.
-  - `POST /api/submit_chunk`: Worker submits chunk results.
-  - `GET /api/job_status/:job_id`: WebApp queries job progress.
-
-### Worker
-
-- **Language**: Rust
-- **Location**: `worker/` directory
-- **Responsibilities**:
-  1. Registers itself with the Scheduler (`/api/register_worker`).
-  2. Repeatedly checks for an available job.
-  3. Calls `assign_chunk?worker_id=...` to get a chunk sized for its performance.
-  4. Performs the Monte Carlo simulation for that chunk, then `submit_chunk` with results.
-  5. Loops indefinitely, requesting new chunks until the job is finished or no jobs remain.
-
-### WebApp
-
-- **Language**: Python (Flask)
-- **Location**: `webapp/` directory
-- **Responsibilities**:
-  1. Renders an HTML page (`index.html`) with a user form to create a new Pi calculation job.
-  2. Sends a request to the Scheduler to create a job, then starts a background polling process to track progress.
-  3. Displays progress (percent complete) and partial π approximations on a Chart.js graph in real time.
-  4. Can kill a previously running job if the user starts a new one.
+## Quick architecture glance
+* **Scheduler** (`scheduler/`): keeps per-job state, sizes chunks to ~2 s per worker, reassigns slow or lost chunks.  
+* **Worker** (`worker/`): polls for work, runs either π simulation or Mandelbrot row, submits results.  
+* **WebApp** (`webapp/`): simple UI + polling; shows progress and renders images/charts in real-time.
 
 ---
 
-## Running Locally
+## Feature highlights
 
-Follow these steps to run the **Scheduler**, **Worker**, and **WebApp** on the same machine:
-
-1. **Prerequisites**
-   - **Rust** (Cargo) installed (for building Scheduler & Worker).
-   - **Python 3** and `pip` (for the WebApp).
-   - Local TLS certificate and key for the Scheduler (`certs/scheduler_cert.pem`, `certs/scheduler_key.pem`). Copy these to "certs" directories in the scheduler/worker directories.
-   - Configure or trust the self-signed certificate so the Worker can connect to `https://127.0.0.1:8443`.
-
-2. **Build & Run the Scheduler**
-   ```bash
-   cd scheduler
-   cargo build --release
-   cargo run
-   ```
-   The Scheduler listens on **port 8443** by default.
-
-3. **Build & Run the Worker**
-   ```bash
-   cd worker
-   cargo build --release
-   cargo run
-   ```
-   The Worker registers itself, then polls the Scheduler for available jobs.
-   
-4. **Run the WebApp**
-   ```bash
-   cd webapp
-   # (Optional) python -m venv && source venv/bin/activate
-   # pip install -r requirements.txt (if used)
-   python app.py
-   ```
-   The Flask server starts on **port 5000** by default
-   
-5. **Open the Web Interface**
-   - Navigate to ```https://127.0.0.1:5000```
-   - Enter the desired number of random points and hit **Calculate**
-   - Watch the progress bar and chart update as workers submit chunks
+| Area | What works today | Notes |
+|------|------------------|-------|
+| Monte-Carlo π | Adaptive chunk sizes per worker | ~8 × speed-up on 8 heterogeneous nodes |
+| Mandelbrot | One row = one chunk | Dynamic chunking planned |
+| Fault tolerance | Over-due chunks auto-requeued; workers can disappear | Parameter = 40 × average chunk time |
+| Transport security | TLS by default (skip verification in local dev) | No SGX/SEV yet – **don’t send secrets** |
+| Deployment | Cargo binaries or multi-stage Dockerfiles | See below |
 
 ---
 
-## Notes
+## Local quick-start
 
-- **Chunk Overhead**: Chunk assignments have communication overhead, so chunk sizing is important. I am still working on this.
-- **Scaling**: You can run multiple Workers on different machines, or on the same machine, all talking to the same Scheduler.
+### 1 · Prerequisites
+
+* **Rust 1.77+** (install with `rustup`)
+* **Python 3.10+** (for Flask UI)
+* Self-signed cert/key in `certs/` (only needed for local HTTPS)
+
+### 2 · Run the scheduler
+```bash
+cd scheduler
+cargo run --release
+# listens on https://127.0.0.1:8443
+```
+
+### 3 · Launch one or more workers
+```bash
+cd worker
+cargo run --release -- --local     # --local → trust the self-signed cert
+# open new terminals for extra workers
+```
+
+### 4 · Start the web front-end
+```bash
+cd webapp
+python app.py           # http://127.0.0.1:5000
+```
+
+## Docker quick-start (optional)
+```bash
+# scheduler
+docker build -t hydra-scheduler -f scheduler/Dockerfile .
+docker run -p 8443:8443 hydra-scheduler
+
+# worker
+docker build -t hydra-worker -f worker/Dockerfile .
+docker run hydra-worker --local     # repeat for more instances
+
+# webapp (uses system Python image)
+cd webapp
+docker build -t hydra-webapp .
+docker run -p 5000:5000 hydra-webapp
+```
+
+## Roadmap (next 12 months)
+* **Confidential compute:** SGX/SEV support so sensitive data can run on untrusted volunteers
+* **Grid-aware scheduler:** shift chunks toward regions with cleaner electricity
+* **Adaptive Mandelbrot tiling:** variable-height stripes to remove current load imbalance
+* **Tokenised incentives:** optional micro-payments to offset volunteer electricity
