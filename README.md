@@ -1,4 +1,4 @@
-# Hydra — Cloud Computing with Many Heads
+# Hydra: Cloud Computing with Many Heads
 
 Hydra lets idle laptops, desktops, and single-board computers cooperate on embarrassingly-parallel work.  
 The current prototype pairs a **Rust** scheduler + worker binary with a **Python (Flask)** web front-end.
