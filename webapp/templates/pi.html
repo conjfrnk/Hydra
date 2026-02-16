@@ -18,40 +18,213 @@
   along with this program. If not, see <https://www.gnu.org/licenses/>.
 -->
 
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Hydra - Pi Calculation</title>
   <style>
-    body { font-family: sans-serif; margin: 20px; }
-    #progress { margin-top: 20px; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: Calibri, 'Segoe UI', sans-serif;
+      background: #191E19;
+      min-height: 100vh;
+      color: #1A1F1A;
+    }
+
+    .top-bar {
+      height: 4px;
+      background: #1B5E3B;
+      width: 100%;
+    }
+
+    .header {
+      background: #191E19;
+      padding: 48px 0 40px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 2.4rem;
+      font-weight: bold;
+      color: #FFFFFF;
+      margin-bottom: 12px;
+    }
+
+    .header .back-link {
+      color: #A0A5A0;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+
+    .header .back-link:hover {
+      color: #FFFFFF;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+
+    .main-section {
+      background: #F2EDE4;
+      padding: 50px 0 60px;
+    }
+
+    .controls-card {
+      background: #FFFFFF;
+      border-radius: 6px;
+      padding: 28px 28px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+      border-left: 4px solid #1B5E3B;
+      margin-bottom: 30px;
+    }
+
+    .controls-card form {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .controls-card label {
+      font-size: 0.95rem;
+      font-weight: bold;
+      color: #1A1F1A;
+    }
+
+    .controls-card input[type="number"] {
+      font-family: Calibri, 'Segoe UI', sans-serif;
+      font-size: 0.95rem;
+      padding: 8px 12px;
+      border: 1px solid #E8E3DA;
+      border-radius: 4px;
+      background: #FAFAFA;
+      color: #1A1F1A;
+      width: 180px;
+    }
+
+    .controls-card input[type="number"]:focus {
+      outline: none;
+      border-color: #1B5E3B;
+    }
+
+    .controls-card button {
+      font-family: Calibri, 'Segoe UI', sans-serif;
+      font-size: 0.95rem;
+      font-weight: bold;
+      padding: 8px 24px;
+      background: #1B5E3B;
+      color: #FFFFFF;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .controls-card button:hover {
+      background: #2A7A4F;
+    }
+
+    #progress {
+      font-size: 0.95rem;
+      color: #6B706B;
+      margin-bottom: 24px;
+      min-height: 1.4em;
+    }
+
+    .chart-wrapper {
+      background: #FFFFFF;
+      border-radius: 6px;
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    }
+
     #chart-container {
-      width: 80%;
+      width: 100%;
       max-width: 800px;
-      margin: 30px auto;
+      margin: 0 auto;
+    }
+
+    .footer {
+      background: #191E19;
+      text-align: center;
+      padding: 32px 20px;
+      border-top: 1px solid #232823;
+    }
+
+    .footer p {
+      color: #787D78;
+      font-size: 0.85rem;
+    }
+
+    .footer a {
+      color: #A0A5A0;
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      color: #FFFFFF;
+    }
+
+    @media (max-width: 600px) {
+      .header h1 {
+        font-size: 1.8rem;
+      }
+      .container {
+        padding: 0 20px;
+      }
+      .controls-card form {
+        flex-direction: column;
+        align-items: flex-start;
+      }
     }
   </style>
-  <!-- Chart.js from CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <h1>Pi Calculation</h1>
-  <p><a href="/">Back to Index</a></p>
+  <div class="top-bar"></div>
 
-  <form id="piForm">
-    <label for="points">Number of random points:</label>
-    <!-- formerly 1000000000-->
-    <input type="number" id="points" name="points" min="1" step="any" value="100000000">
-    <button type="submit">Calculate</button>
-  </form>
-
-  <div id="progress"></div>
-
-  <div id="chart-container">
-    <canvas id="chart"></canvas>
+  <div class="header">
+    <a href="/" class="back-link">Back to Index</a>
+    <h1>Pi Calculation</h1>
   </div>
 
-  <!-- Load the Web Worker -->
+  <div class="main-section">
+    <div class="container">
+      <div class="controls-card">
+        <form id="piForm">
+          <label for="points">Number of random points:</label>
+          <input type="number" id="points" name="points" min="1" step="any" value="100000000">
+          <button type="submit">Calculate</button>
+        </form>
+      </div>
+
+      <div id="progress"></div>
+
+      <div class="chart-wrapper">
+        <div id="chart-container">
+          <canvas id="chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <p>
+      Created by <a href="https://conjfrnk.com" target="_blank">Connor Frank</a>
+      &mdash;
+      <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
+    </p>
+  </div>
+
   <script>
     let pollWorker = new Worker("/static/heartbeatWorker.js");
   </script>
@@ -86,7 +259,7 @@
 
         const ctx = chart.ctx;
         ctx.save();
-        ctx.fillStyle = 'blue';
+        ctx.fillStyle = '#1B5E3B';
         ctx.beginPath();
         ctx.arc(xPos, yPos, 5, 0, 2 * Math.PI);
         ctx.fill();
@@ -101,7 +274,7 @@
           {
             label: 'Pi Approximation',
             data: [],
-            borderColor: 'blue',
+            borderColor: '#1B5E3B',
             borderWidth: 2,
             fill: false,
             tension: 0.1,
@@ -113,7 +286,7 @@
               {x: 0,   y: ACTUAL_PI},
               {x: 100, y: ACTUAL_PI}
             ],
-            borderColor: 'red',
+            borderColor: '#D4453A',
             borderDash: [10, 5],
             borderWidth: 2,
             fill: false,
@@ -176,7 +349,6 @@
       }
     }
 
-    // Update the Pi chart using the complete sample history.
     async function updatePiChart() {
       if (!currentJobId) return;
       try {
@@ -193,7 +365,6 @@
       }
     }
 
-    // Listen for messages from the Worker
     pollWorker.onmessage = function(e) {
       let msg = e.data;
       if (msg.type === "STATUS") {
@@ -208,7 +379,6 @@
           progressDiv.textContent = `Done! Approx pi: ${finalVal} (${hms})`;
           chart.data.datasets[0].data.push({ x: 100, y: finalVal });
           chart.update();
-          // Final update of sample history
           updatePiChart();
 
           pollWorker.postMessage({ type: "STOP" });
@@ -216,7 +386,6 @@
         } else if (sData.status === "in-progress") {
           let partialVal = parseFloat(sData.partial_result);
           let pct = parseFloat(sData.percent_complete);
-          // Only add a new data point when a new whole percent is reached
           let data = chart.data.datasets[0].data;
           if (data.length === 0 || Math.floor(pct) > Math.floor(data[data.length - 1].x)) {
             chart.data.datasets[0].data.push({ x: pct, y: partialVal });
@@ -234,7 +403,6 @@
           progressDiv.textContent =
             `Job in progress... Approx pi: ${partialVal} ` +
             `(${pct.toFixed(2)}% done)${timeLeftStr}`;
-          // Also update chart with complete history for synchronization
           updatePiChart();
         } else if (sData.status === "error") {
           progressDiv.textContent = "Job encountered an error or was canceled.";
@@ -251,7 +419,6 @@
     };
 
     document.addEventListener('visibilitychange', async () => {
-      // On returning to the tab, try to catch up
       if (!document.hidden && currentJobId) {
         updatePiChart();
       }
@@ -263,7 +430,6 @@
       const pointsVal = parseInt(pointsInput.value, 10);
 
       if (currentJobId) {
-        // kill old job
         try {
           await fetch("/mark_old_job", {
             method: "POST",
@@ -292,7 +458,6 @@
       let createData = await createResp.json();
       currentJobId = createData.job_id;
 
-      // Reset chart
       chart.data.datasets[0].data = [];
       chart.data.datasets[1].data = [
         { x: 0,   y: ACTUAL_PI },
@@ -304,15 +469,8 @@
 
       progressDiv.textContent = `Job started. Job ID: ${currentJobId}`;
 
-      // Start Worker polling every 500ms for a good balance of freshness and load
       pollWorker.postMessage({ type: "START", jobId: currentJobId, intervalMs: 1000 });
     });
   </script>
-
-  <footer style="text-align: center; margin-top: 20px;">
-    Created by <a href="https://conjfrnk.com" target="_blank">Connor Frank</a>
-    --
-    <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
-  </footer>
 </body>
 </html>

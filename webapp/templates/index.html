@@ -17,28 +17,384 @@
 -->
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Hydra</title>
-  <style>
-    body { font-family: sans-serif; margin: 20px; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hydra - Next-Generation Distributed Computing</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Calibri, 'Segoe UI', sans-serif;
+            background: #191E19;
+            min-height: 100vh;
+            color: #1A1F1A;
+        }
+
+        .top-bar {
+            height: 4px;
+            background: #1B5E3B;
+            width: 100%;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 40px;
+        }
+
+        /* --- Hero (dark) --- */
+        .hero {
+            background: #191E19;
+            padding: 80px 0 70px;
+        }
+
+        .hero .container {
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-family: Georgia, 'Times New Roman', serif;
+            font-size: 3rem;
+            font-weight: bold;
+            color: #FFFFFF;
+            margin-bottom: 16px;
+        }
+
+        .hero p {
+            font-size: 1.1rem;
+            color: #A0A5A0;
+            max-width: 680px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        /* --- Features (light) --- */
+        .features-section {
+            background: #F2EDE4;
+            padding: 70px 0;
+        }
+
+        .section-title {
+            font-family: Georgia, 'Times New Roman', serif;
+            font-size: 2rem;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 40px;
+            color: #1A1F1A;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+
+        .feature-card {
+            background: #FFFFFF;
+            border-radius: 6px;
+            padding: 28px 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+            border-left: 4px solid #1B5E3B;
+            position: relative;
+        }
+
+        .feature-card h3 {
+            font-family: Calibri, 'Segoe UI', sans-serif;
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #1A1F1A;
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            font-size: 0.95rem;
+            color: #6B706B;
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-live {
+            background: #1B5E3B;
+            color: #FFFFFF;
+        }
+
+        .badge-beta {
+            background: #C4A94F;
+            color: #FFFFFF;
+        }
+
+        /* --- Compute (dark) --- */
+        .compute-section {
+            background: #191E19;
+            padding: 70px 0;
+        }
+
+        .compute-section .section-title {
+            color: #FFFFFF;
+        }
+
+        .compute-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 24px;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        .compute-card {
+            display: block;
+            background: #232823;
+            border-radius: 6px;
+            padding: 32px 28px;
+            text-decoration: none;
+            border-top: 3px solid #1B5E3B;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .compute-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+        }
+
+        .compute-card h3 {
+            font-family: Calibri, 'Segoe UI', sans-serif;
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #FFFFFF;
+            margin-bottom: 10px;
+        }
+
+        .compute-card p {
+            font-size: 0.9rem;
+            color: #A0A5A0;
+            line-height: 1.5;
+        }
+
+        /* --- Stats (light) --- */
+        .stats-section {
+            background: #F2EDE4;
+            padding: 70px 0;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+
+        .stat-card {
+            background: #FFFFFF;
+            border-radius: 6px;
+            padding: 28px 20px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+            border-top: 3px solid #1B5E3B;
+        }
+
+        .stat-value {
+            font-family: Georgia, 'Times New Roman', serif;
+            font-size: 2.2rem;
+            font-weight: bold;
+            color: #1B5E3B;
+            margin-bottom: 6px;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: #6B706B;
+        }
+
+        /* --- Footer (dark) --- */
+        .footer {
+            background: #191E19;
+            text-align: center;
+            padding: 32px 20px;
+            border-top: 1px solid #232823;
+        }
+
+        .footer p {
+            color: #787D78;
+            font-size: 0.85rem;
+        }
+
+        .footer a {
+            color: #A0A5A0;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            color: #FFFFFF;
+        }
+
+        /* --- Responsive --- */
+        @media (max-width: 900px) {
+            .features-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 600px) {
+            .hero h1 {
+                font-size: 2.2rem;
+            }
+            .container {
+                padding: 0 20px;
+            }
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+            .compute-grid {
+                grid-template-columns: 1fr;
+            }
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
 </head>
 <body>
-  <h1>Hydra Distributed Computing</h1>
+    <div class="top-bar"></div>
 
-  <p>Welcome! Please pick a calculation:</p>
+    <div class="hero">
+        <div class="container">
+            <h1>Hydra</h1>
+            <p>Next-generation distributed computing with confidential compute, grid-aware scheduling, and tokenized incentives.</p>
+        </div>
+    </div>
 
-  <ul>
-    <li><a href="/pi">Calculate Pi</a></li>
-    <li><a href="/mandelbrot">Calculate Mandelbrot</a></li>
-  </ul>
+    <div class="features-section">
+        <div class="container">
+            <h2 class="section-title">Platform Features</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <h3>Confidential Compute</h3>
+                    <p>Secure computation using SGX enclaves. Your data remains encrypted and protected even on untrusted volunteer machines.</p>
+                    <span class="badge badge-live">Live</span>
+                </div>
 
-  <footer style="text-align: center; margin-top: 20px;">
-    Created by <a href="https://conjfrnk.com" target="_blank">Connor Frank</a>
-    --
-    <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
-  </footer>
+                <div class="feature-card">
+                    <h3>Grid-Aware Scheduling</h3>
+                    <p>Intelligent work distribution that considers carbon intensity and renewable energy availability across regions.</p>
+                    <span class="badge badge-live">Live</span>
+                </div>
+
+                <div class="feature-card">
+                    <h3>Adaptive Tiling</h3>
+                    <p>Dynamic chunk sizing for Mandelbrot computation based on complexity analysis and worker performance.</p>
+                    <span class="badge badge-beta">Beta</span>
+                </div>
+
+                <div class="feature-card">
+                    <h3>Tokenized Incentives</h3>
+                    <p>Earn tokens for computational contributions, with bonuses for renewable energy usage and carbon offset.</p>
+                    <span class="badge badge-live">Live</span>
+                </div>
+
+                <div class="feature-card">
+                    <h3>Adaptive Chunking</h3>
+                    <p>Smart Pi computation with dynamic chunk sizes that adapt to worker performance and job progress.</p>
+                    <span class="badge badge-beta">Beta</span>
+                </div>
+
+                <div class="feature-card">
+                    <h3>Performance Optimization</h3>
+                    <p>Advanced load balancing and fault tolerance with automatic retry and chunk reassignment.</p>
+                    <span class="badge badge-live">Live</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="compute-section">
+        <div class="container">
+            <h2 class="section-title">Start Computing</h2>
+            <div class="compute-grid">
+                <a href="/pi" class="compute-card">
+                    <h3>Calculate Pi</h3>
+                    <p>Monte Carlo simulation with adaptive chunking and performance optimization</p>
+                </a>
+                <a href="/mandelbrot" class="compute-card">
+                    <h3>Mandelbrot Set</h3>
+                    <p>Fractal rendering with adaptive tiling and complexity-based load balancing</p>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="stats-section">
+        <div class="container">
+            <h2 class="section-title">Live System Metrics</h2>
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="active-workers">-</div>
+                    <div class="stat-label">Active Workers</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-tokens">-</div>
+                    <div class="stat-label">Tokens Distributed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="carbon-offset">-</div>
+                    <div class="stat-label">Carbon Offset (kg)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="renewable-energy">-</div>
+                    <div class="stat-label">Renewable Energy (kWh)</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>
+            Created by <a href="https://conjfrnk.com" target="_blank">Connor Frank</a>
+            &mdash;
+            <a href="https://github.com/conjfrnk/hydra" target="_blank">View on GitHub</a>
+        </p>
+    </div>
+
+    <script>
+        async function updateMetrics() {
+            try {
+                const [tokenMetrics, sustainabilityMetrics] = await Promise.all([
+                    fetch('/api/token_metrics').then(r => r.json()),
+                    fetch('/api/sustainability_metrics').then(r => r.json())
+                ]);
+
+                document.getElementById('active-workers').textContent =
+                    Math.round(tokenMetrics.active_workers || 0);
+                document.getElementById('total-tokens').textContent =
+                    Math.round(tokenMetrics.total_tokens_distributed || 0);
+                document.getElementById('carbon-offset').textContent =
+                    Math.round(tokenMetrics.total_carbon_offset_kg || 0);
+                document.getElementById('renewable-energy').textContent =
+                    Math.round(tokenMetrics.total_renewable_energy_kwh || 0);
+            } catch (error) {
+                console.log('Could not fetch metrics:', error);
+            }
+        }
+
+        updateMetrics();
+        setInterval(updateMetrics, 30000);
+    </script>
 </body>
 </html>
