@@ -15,11 +15,13 @@
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::{Result, bail};
-use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{env, thread, time::Duration};
 use uuid::Uuid;
+
+mod confidential;
+use confidential::{ConfidentialCompute, ConfidentialConfig};
 
 ////////////////////////////////////////////////
 // Data Structures (unchanged)
@@ -79,7 +81,7 @@ struct RegisterWorkerResponse {
 const PROD_SCHEDULER_URL: &str = "https://scheduler.hydracompute.com";
 
 /// An optional local URL for development if `--local` is specified.
-const LOCAL_SCHEDULER_URL: &str = "https://127.0.0.1:8443";
+const LOCAL_SCHEDULER_URL: &str = "http://127.0.0.1:8443";
 
 ////////////////////////////////////////////////
 // main
@@ -100,6 +102,17 @@ async fn main() -> Result<()> {
 
     // Build the HTTP/TLS client
     let client = build_https_client(&scheduler_url).await?;
+
+    // Initialize confidential compute if enabled
+    let confidential_config = ConfidentialConfig {
+        enabled: env::var("HYDRA_CONFIDENTIAL").unwrap_or_else(|_| "false".to_string()) == "true",
+        enclave_path: env::var("HYDRA_ENCLAVE_PATH").ok(),
+        attestation_required: env::var("HYDRA_ATTESTATION").unwrap_or_else(|_| "false".to_string()) == "true",
+        encryption_enabled: env::var("HYDRA_ENCRYPTION").unwrap_or_else(|_| "true".to_string()) == "true",
+    };
+    let confidential_config_print = confidential_config.clone();
+    let confidential_compute = ConfidentialCompute::new(confidential_config)?;
+    println!("[Worker] Confidential compute: enabled={}", confidential_config_print.enabled);
 
     // Create a unique worker ID
     let worker_id = format!("worker-{}", Uuid::new_v4());
@@ -142,7 +155,10 @@ async fn main() -> Result<()> {
                 println!("[Worker] job_id={} => working on chunk {}", job_id, cindex);
 
                 if chunk_data.task_type == "calculate_pi" {
-                    let points_in_circle = do_monte_carlo(cpoints);
+                    let chunk_data_bytes = cpoints.to_le_bytes().to_vec();
+                    let result = confidential_compute.compute_in_enclave("calculate_pi", &chunk_data_bytes).await?;
+                    let points_in_circle = u64::from_le_bytes(result[..8].try_into().unwrap_or([0; 8]));
+                    
                     let sc_req = SubmitChunkRequest {
                         worker_id: worker_id.clone(),
                         job_id: job_id.clone(),
@@ -157,7 +173,14 @@ async fn main() -> Result<()> {
                 } else if chunk_data.task_type == "calculate_mandelbrot" {
                     let row_index = cindex as u32;
                     let resolution = chunk_data.resolution;
-                    let row_colors = compute_mandel_row(row_index, resolution);
+                    
+                    // Prepare chunk data for confidential compute
+                    let mut chunk_data_bytes = Vec::new();
+                    chunk_data_bytes.extend_from_slice(&row_index.to_le_bytes());
+                    chunk_data_bytes.extend_from_slice(&resolution.to_le_bytes());
+                    
+                    let result = confidential_compute.compute_in_enclave("calculate_mandelbrot", &chunk_data_bytes).await?;
+                    let row_colors: Vec<MandelPixel> = serde_json::from_slice(&result).unwrap_or_default();
 
                     let sc_req = SubmitChunkRequest {
                         worker_id: worker_id.clone(),
@@ -288,11 +311,10 @@ async fn submit_chunk(
 }
 
 fn do_monte_carlo(n: u64) -> u64 {
-    let mut rng = rand::thread_rng();
     let mut count = 0;
     for _ in 0..n {
-        let x: f64 = rng.r#gen();
-        let y: f64 = rng.r#gen();
+        let x: f64 = rand::random();
+        let y: f64 = rand::random();
         if x * x + y * y <= 1.0 {
             count += 1;
         }

@@ -33,6 +33,14 @@ use std::{
 };
 use tokio::net::TcpListener;
 
+mod grid_aware;
+mod adaptive_tiling;
+mod adaptive_chunking;
+mod token_incentives;
+use grid_aware::{GridAwareScheduler, GridAwareConfig};
+
+use token_incentives::{TokenIncentiveSystem, TokenIncentiveConfig, WorkerTokenBalance};
+
 /////////////////////////////////////
 // AppState, Data (Unchanged)
 /////////////////////////////////////
@@ -43,6 +51,8 @@ struct AppState {
     workers: Arc<Mutex<HashMap<String, WorkerStats>>>,
     run_queue: Arc<Mutex<Vec<String>>>,
     round_counter: Arc<Mutex<u64>>,
+    grid_scheduler: Arc<GridAwareScheduler>,
+    token_system: Arc<TokenIncentiveSystem>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -180,6 +190,49 @@ struct HistoryResponse {
     pixels: Vec<MandelPixel>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateGridInfoRequest {
+    worker_id: String,
+    region_id: Option<String>,
+    estimated_power_consumption: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateGridInfoResponse {
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SustainabilityMetricsResponse {
+    avg_carbon_intensity: f64,
+    avg_electricity_cost: f64,
+    avg_renewable_percentage: f64,
+    total_workers: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferTokensRequest {
+    from_worker: String,
+    to_worker: String,
+    amount: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TransferTokensResponse {
+    success: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenMetricsResponse {
+    total_tokens_distributed: f64,
+    total_computation_units: f64,
+    total_carbon_offset_kg: f64,
+    total_renewable_energy_kwh: f64,
+    active_workers: f64,
+    avg_tokens_per_worker: f64,
+}
+
 /////////////////////////////////////
 // main
 /////////////////////////////////////
@@ -188,11 +241,39 @@ async fn main() -> Result<()> {
     let env = env::var("HYDRA_ENV").unwrap_or_else(|_| "development".to_string());
     println!("[Scheduler] Running in HYDRA_ENV={}", env);
 
+    // Initialize grid-aware scheduler
+    let grid_config = GridAwareConfig {
+        enabled: env::var("HYDRA_GRID_AWARE").unwrap_or_else(|_| "true".to_string()) == "true",
+        carbon_weight: env::var("HYDRA_CARBON_WEIGHT").unwrap_or_else(|_| "0.4".to_string()).parse().unwrap_or(0.4),
+        cost_weight: env::var("HYDRA_COST_WEIGHT").unwrap_or_else(|_| "0.3".to_string()).parse().unwrap_or(0.3),
+        renewable_weight: env::var("HYDRA_RENEWABLE_WEIGHT").unwrap_or_else(|_| "0.3".to_string()).parse().unwrap_or(0.3),
+        update_interval_seconds: 300, // 5 minutes
+    };
+    let grid_config_print = grid_config.clone();
+    let grid_scheduler = Arc::new(GridAwareScheduler::new(grid_config));
+    println!("[Scheduler] Grid-aware scheduling: enabled={}", grid_config_print.enabled);
+
+    // Initialize token incentive system
+    let token_config = TokenIncentiveConfig {
+        enabled: env::var("HYDRA_TOKEN_INCENTIVES").unwrap_or_else(|_| "true".to_string()) == "true",
+        base_token_rate: env::var("HYDRA_BASE_TOKEN_RATE").unwrap_or_else(|_| "0.1".to_string()).parse().unwrap_or(0.1),
+        carbon_bonus_rate: env::var("HYDRA_CARBON_BONUS_RATE").unwrap_or_else(|_| "0.5".to_string()).parse().unwrap_or(0.5),
+        renewable_bonus_rate: env::var("HYDRA_RENEWABLE_BONUS_RATE").unwrap_or_else(|_| "0.3".to_string()).parse().unwrap_or(0.3),
+        performance_multiplier: env::var("HYDRA_PERFORMANCE_MULTIPLIER").unwrap_or_else(|_| "0.2".to_string()).parse().unwrap_or(0.2),
+        reliability_bonus: env::var("HYDRA_RELIABILITY_BONUS").unwrap_or_else(|_| "0.1".to_string()).parse().unwrap_or(0.1),
+        max_tokens_per_chunk: env::var("HYDRA_MAX_TOKENS_PER_CHUNK").unwrap_or_else(|_| "10.0".to_string()).parse().unwrap_or(10.0),
+    };
+    let token_config_print = token_config.clone();
+    let token_system = Arc::new(TokenIncentiveSystem::new(token_config));
+    println!("[Scheduler] Token incentives: enabled={}", token_config_print.enabled);
+
     let state = AppState {
         jobs: Arc::new(Mutex::new(HashMap::new())),
         workers: Arc::new(Mutex::new(HashMap::new())),
         run_queue: Arc::new(Mutex::new(Vec::new())),
         round_counter: Arc::new(Mutex::new(0)),
+        grid_scheduler,
+        token_system,
     };
 
     // periodic tasks
@@ -221,6 +302,12 @@ async fn main() -> Result<()> {
         .route("/api/assign_chunk/:job_id", get(assign_chunk))
         .route("/api/mark_job_error/:job_id", post(mark_job_error))
         .route("/api/job_history/:job_id", get(get_job_history))
+        .route("/api/update_grid_info", post(update_grid_info))
+        .route("/api/sustainability_metrics", get(get_sustainability_metrics))
+        .route("/api/worker_balance/:worker_id", get(get_worker_balance))
+        .route("/api/leaderboard", get(get_leaderboard))
+        .route("/api/transfer_tokens", post(transfer_tokens))
+        .route("/api/token_metrics", get(get_token_metrics))
         .with_state(state);
 
     // In PRODUCTION, we bind to 0.0.0.0:8443 (plaintext) so the ALB can connect
@@ -800,4 +887,90 @@ fn remove_from_queue(queue: &mut Vec<String>, job_id: &str) {
 
 async fn health_ok() -> impl IntoResponse {
     (StatusCode::OK, "OK\n")
+}
+
+async fn update_grid_info(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateGridInfoRequest>,
+) -> Json<UpdateGridInfoResponse> {
+    if let Err(e) = state.grid_scheduler.update_worker_grid_info(
+        &payload.worker_id,
+        payload.region_id,
+        payload.estimated_power_consumption,
+    ).await {
+        eprintln!("[Scheduler] Failed to update grid info: {:?}", e);
+        return Json(UpdateGridInfoResponse {
+            status: "error".to_string(),
+        });
+    }
+
+    Json(UpdateGridInfoResponse {
+        status: "success".to_string(),
+    })
+}
+
+async fn get_sustainability_metrics(
+    State(state): State<AppState>,
+) -> Json<SustainabilityMetricsResponse> {
+    let metrics = state.grid_scheduler.get_sustainability_metrics().await;
+    let workers = state.workers.lock().unwrap();
+    
+    Json(SustainabilityMetricsResponse {
+        avg_carbon_intensity: metrics.get("avg_carbon_intensity").copied().unwrap_or(0.0),
+        avg_electricity_cost: metrics.get("avg_electricity_cost").copied().unwrap_or(0.0),
+        avg_renewable_percentage: metrics.get("avg_renewable_percentage").copied().unwrap_or(0.0),
+        total_workers: workers.len(),
+    })
+}
+
+async fn get_worker_balance(
+    State(state): State<AppState>,
+    Path(worker_id): Path<String>,
+) -> impl IntoResponse {
+    match state.token_system.get_worker_balance(&worker_id).await {
+        Some(balance) => Json(balance).into_response(),
+        None => (StatusCode::NOT_FOUND, "Worker not found").into_response(),
+    }
+}
+
+async fn get_leaderboard(
+    State(state): State<AppState>,
+) -> Json<Vec<WorkerTokenBalance>> {
+    let leaderboard = state.token_system.get_leaderboard().await;
+    Json(leaderboard)
+}
+
+async fn transfer_tokens(
+    State(state): State<AppState>,
+    Json(payload): Json<TransferTokensRequest>,
+) -> Json<TransferTokensResponse> {
+    match state.token_system.transfer_tokens(&payload.from_worker, &payload.to_worker, payload.amount).await {
+        Ok(true) => Json(TransferTokensResponse {
+            success: true,
+            message: "Transfer successful".to_string(),
+        }),
+        Ok(false) => Json(TransferTokensResponse {
+            success: false,
+            message: "Transfer failed - insufficient funds or worker not found".to_string(),
+        }),
+        Err(_) => Json(TransferTokensResponse {
+            success: false,
+            message: "Transfer failed - internal error".to_string(),
+        }),
+    }
+}
+
+async fn get_token_metrics(
+    State(state): State<AppState>,
+) -> Json<TokenMetricsResponse> {
+    let metrics = state.token_system.get_sustainability_metrics().await;
+    
+    Json(TokenMetricsResponse {
+        total_tokens_distributed: metrics.get("total_tokens_distributed").copied().unwrap_or(0.0),
+        total_computation_units: metrics.get("total_computation_units").copied().unwrap_or(0.0),
+        total_carbon_offset_kg: metrics.get("total_carbon_offset_kg").copied().unwrap_or(0.0),
+        total_renewable_energy_kwh: metrics.get("total_renewable_energy_kwh").copied().unwrap_or(0.0),
+        active_workers: metrics.get("active_workers").copied().unwrap_or(0.0),
+        avg_tokens_per_worker: metrics.get("avg_tokens_per_worker").copied().unwrap_or(0.0),
+    })
 }

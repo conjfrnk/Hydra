@@ -172,6 +172,32 @@ def job_history(job_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/token_metrics", methods=["GET"])
+def token_metrics():
+    try:
+        url = f"{SCHEDULER_URL}/api/token_metrics"
+        resp = requests.get(url, verify=VERIFY_HTTPS)
+        if not resp.ok:
+            return jsonify({"error": f"Non-OK from scheduler: {resp.status_code}"}), resp.status_code
+        return jsonify(resp.json()), 200
+    except Exception as e:
+        print(f"[WebApp] Exception in token_metrics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/sustainability_metrics", methods=["GET"])
+def sustainability_metrics():
+    try:
+        url = f"{SCHEDULER_URL}/api/sustainability_metrics"
+        resp = requests.get(url, verify=VERIFY_HTTPS)
+        if not resp.ok:
+            return jsonify({"error": f"Non-OK from scheduler: {resp.status_code}"}), resp.status_code
+        return jsonify(resp.json()), 200
+    except Exception as e:
+        print(f"[WebApp] Exception in sustainability_metrics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     print("[WebApp] Starting Flask app on http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=True)
